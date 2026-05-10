@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "423527344498",
+    "project_id": "campus-locator-91b68",
+    "storage_bucket": "campus-locator-91b68.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:423527344498:android:888b5e09d5440b8fb5d5eb",
+        "android_client_info": {
+          "package_name": "com.example.campus_locator"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCtKzr6yIx8juGlNNkjpslgkZ6Y2isMcAM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
