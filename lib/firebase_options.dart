@@ -53,7 +53,7 @@ class DefaultFirebaseOptions {
   }
 
   static const FirebaseOptions android = FirebaseOptions(
-    apiKey: 'AIzaSyCtKzr6yIx8juGlNNkjpslgkZ6Y2isMcAM',
+     apiKey: dotenv.env['FIREBASE_API_KEY'] ?? '',
     appId: '1:423527344498:android:888b5e09d5440b8fb5d5eb',
     messagingSenderId: '423527344498',
     projectId: 'campus-locator-91b68',
