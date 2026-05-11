@@ -394,15 +394,15 @@ Location updates are triggered by a **10-metre distance filter** rather than a f
 
 ## 🚀 Future Enhancements
 
-
-| Enhancement | Description | Enabling Technology |
-| :--- | :--- | :--- |
-| **Indoor Navigation** | Floor-level positioning inside campus buildings using BLE beacons or Wi-Fi fingerprinting | `flutter_blue_plus`, BLE beacon hardware, Wi-Fi RTT |
-| **Push Notifications** | Receive incoming calls and messages when app is in background or closed | Firebase Cloud Messaging (FCM) |
-| **Emergency SOS** | One-tap distress alert sent to all nearby trusted connections simultaneously | Firestore broadcast + FCM |
-| **Video Calls** | Add camera stream to existing WebRTC infrastructure | `flutter_webrtc`, `CallService` |
-| **iOS Support** | Full iOS deployment with proper entitlements, background location, and VoIP push | Apple Developer account, `CallKit`, `PushKit` |
-| **Route Guidance** | Turn-by-turn walking directions between two campus users on the map | OSRM routing API + `flutter_map` polyline layer |
+| Enhancement | What Exists Now | What Needs to Be Added | Enabling Technology |
+| :--- | :--- | :--- | :--- |
+| **Video Calls** | `flutter_webrtc` is integrated; `CallService._getLocalAudio` has `video: false` | Change `video: false` → `video: true`; add camera permission; add `RTCVideoRenderer` widget in `CallScreen` | `flutter_webrtc` (in pubspec), `CAMERA` permission in AndroidManifest |
+| **Route Guidance** | `flutter_map` + OpenStreetMap + `latlong2` are live on the Nearby tab with user markers | Add OSRM API call between two `LatLng` points; draw a `PolylineLayer` on the existing map | `flutter_map` polyline layer, OSRM public routing API |
+| **Push Notifications** | FCM is not yet integrated; Firebase project exists | Add `firebase_messaging` to pubspec; register background handler; store FCM tokens in `/users/{uid}` | `firebase_messaging` package, AndroidManifest background service |
+| **Emergency SOS** | Firestore `/connections` list and broadcast structure exist | Add an SOS document to a new `/sos_alerts` collection; trigger FCM notification to all connected UIDs | Existing Firestore connections + `firebase_messaging` |
+| **Indoor Navigation** | `LocationService` uses GPS-only with no provider interface | Refactor `LocationService` into abstract `LocationProvider` with BLE subclass; integrate `flutter_blue_plus` | `flutter_blue_plus`, BLE beacon hardware |
+| **iOS Full Support** | iOS folder exists; `firebase_options.dart` throws `UnsupportedError` for iOS | Configure `GoogleService-Info.plist`; add CallKit/PushKit entitlements; fix Firebase config | Apple Developer account, CallKit, PushKit |
+| **Location Timeline** | `lastLocation` GeoPoint and `lastSeen` Timestamp stored in Firestore | Add a `/location_history/{uid}/snapshots` subcollection; build a `TimelineView` for map replay | Existing `geolocator` stream + Firestore subcollection |
 
 ---
 
