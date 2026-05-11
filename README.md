@@ -394,14 +394,15 @@ Location updates are triggered by a **10-metre distance filter** rather than a f
 
 ## 🚀 Future Enhancements
 
-- Indoor Navigation & Route Guidance
-- Voice Alerts
-- Emergency SOS System
-- Battery status of people
-- Disconnect option for users
-- student can have direct access to see faculty location
-- Faculty can have option to turn on / turn off their location
-- call and message feature can be implemented in a better way for user experince
+
+| Enhancement | Description | Enabling Technology |
+| :--- | :--- | :--- |
+| **Indoor Navigation** | Floor-level positioning inside campus buildings using BLE beacons or Wi-Fi fingerprinting | `flutter_blue_plus`, BLE beacon hardware, Wi-Fi RTT |
+| **Push Notifications** | Receive incoming calls and messages when app is in background or closed | Firebase Cloud Messaging (FCM) |
+| **Emergency SOS** | One-tap distress alert sent to all nearby trusted connections simultaneously | Firestore broadcast + FCM |
+| **Video Calls** | Add camera stream to existing WebRTC infrastructure | `flutter_webrtc`, `CallService` |
+| **iOS Support** | Full iOS deployment with proper entitlements, background location, and VoIP push | Apple Developer account, `CallKit`, `PushKit` |
+| **Route Guidance** | Turn-by-turn walking directions between two campus users on the map | OSRM routing API + `flutter_map` polyline layer |
 
 ---
 
