@@ -564,17 +564,107 @@ Location updates are triggered by a **10-metre distance filter** rather than a f
 
 ## 🚀 Future Enhancements
 
-| Enhancement | What Exists Now | What Needs to Be Added | Enabling Technology |
-| :--- | :--- | :--- | :--- |
-| **Video Calls** | `flutter_webrtc` is integrated; `CallService._getLocalAudio` has `video: false` | Change `video: false` → `video: true`; add camera permission; add `RTCVideoRenderer` widget in `CallScreen` | `flutter_webrtc` (in pubspec), `CAMERA` permission in AndroidManifest |
-| **Route Guidance** | `flutter_map` + OpenStreetMap + `latlong2` are live on the Nearby tab with user markers | Add OSRM API call between two `LatLng` points; draw a `PolylineLayer` on the existing map | `flutter_map` polyline layer, OSRM public routing API |
-| **Push Notifications** | FCM is not yet integrated; Firebase project exists | Add `firebase_messaging` to pubspec; register background handler; store FCM tokens in `/users/{uid}` | `firebase_messaging` package, AndroidManifest background service |
-| **Emergency SOS** | Firestore `/connections` list and broadcast structure exist | Add an SOS document to a new `/sos_alerts` collection; trigger FCM notification to all connected UIDs | Existing Firestore connections + `firebase_messaging` |
-| **Indoor Navigation** | `LocationService` uses GPS-only with no provider interface | Refactor `LocationService` into abstract `LocationProvider` with BLE subclass; integrate `flutter_blue_plus` | `flutter_blue_plus`, BLE beacon hardware |
-| **iOS Full Support** | iOS folder exists; `firebase_options.dart` throws `UnsupportedError` for iOS | Configure `GoogleService-Info.plist`; add CallKit/PushKit entitlements; fix Firebase config | Apple Developer account, CallKit, PushKit |
-| **Location Timeline** | `lastLocation` GeoPoint and `lastSeen` Timestamp stored in Firestore | Add a `/location_history/{uid}/snapshots` subcollection; build a `TimelineView` for map replay | Existing `geolocator` stream + Firestore subcollection |
+---
+
+### 1 — FCM Push Notifications for Incoming Calls ⚠️ Critical Gap
+
+**What exists now:**
+The `IncomingCallListener` widget in `lib/main.dart` listens to the Firestore `/calls` collection for documents where `calleeUid == myUid` and `status == 'ringing'`. This works **only when the app is open and in the foreground**. If the callee's screen is off or the app is backgrounded, the Firestore listener is paused — the call is missed entirely. For a campus safety app, this is the single most critical limitation.
+
+**What needs to be added:**
+- Add `firebase_messaging` to `pubspec.yaml`
+- Register a background message handler via `FirebaseMessaging.onBackgroundMessage()`
+- When `CallService.startCall()` writes a `ringing` document to Firestore, trigger a Cloud Function to send a high-priority FCM notification to the callee's device token
+- Store the FCM token on login: `users/{uid}.fcmToken`
+- Handle the notification tap to deep-link directly into `CallScreen`
+
+**Enabling technology:** `firebase_messaging` package + Firebase Cloud Functions
 
 ---
+
+### 2 — Video Calls via `flutter_webrtc`
+
+**What exists now:**
+`CallService` in `lib/main.dart` already manages a complete WebRTC peer connection lifecycle — SDP offer/answer exchange, ICE candidate negotiation via Firestore `/calls/{chatId}`, STUN server config (`stun.l.google.com:19302`), mute toggle, and remote hang-up detection. The `_getLocalAudio()` method calls `navigator.mediaDevices.getUserMedia({'audio': true, 'video': false})` — video is explicitly set to `false`.
+
+**What needs to be added:**
+- Change `'video': false` → `'video': true` in `_getLocalAudio()`
+- Add `Permission.camera.request()` alongside the existing `Permission.microphone.request()` call
+- Add `RTCVideoRenderer` widgets inside `InAppCallScreen` for local and remote video preview
+- Add `<uses-permission android:name="android.permission.CAMERA"/>` to `AndroidManifest.xml`
+
+**Enabling technology:** `flutter_webrtc` (already in `pubspec.yaml`) — no new package required
+
+---
+
+### 3 — Emergency SOS Broadcast
+
+**What exists now:**
+`ConnectionService.getConnectedUids(myUid)` fetches all mutual connection UIDs from the Firestore `/connections` collection. The `AiDecisionEngine` already builds a ranked list of nearby connected users with distance and role. The Firestore infrastructure to write to named collections and address a known list of UIDs is fully operational.
+
+**What needs to be added:**
+- Add a dedicated SOS button on `HomeScreen` or `_NearbyTab`
+- On tap, write an SOS document to a new `/sos_alerts` collection: `{ fromUid, location: GeoPoint, timestamp, message: "I need help" }`
+- Use FCM (item 1 above) to push a high-priority notification to all `getConnectedUids()` simultaneously
+- Each recipient sees the sender's last known `GeoPoint` from `users/{uid}.location` pinned on their map
+
+**Enabling technology:** Existing `ConnectionService` + `/connections` Firestore collection + `firebase_messaging`
+
+---
+
+### 4 — Turn-by-Turn Route Guidance on the Map
+
+**What exists now:**
+`_NearbyTab` renders a live `flutter_map` + OpenStreetMap map with a `MarkerLayer` showing all nearby users. The `LatLng` coordinates of every user are already computed from their Firestore `location` GeoPoint. The map and HTTP infrastructure are both fully wired.
+
+**What needs to be added:**
+- When a user taps a person's marker or the "Navigate" action from `AiDecisionEngine` suggestion cards, call the OSRM public routing API: `http://router.project-osrm.org/route/v1/foot/{fromLng},{fromLat};{toLng},{toLat}?geometries=geojson`
+- Parse the returned GeoJSON polyline coordinates into a `List<LatLng>`
+- Render it using `flutter_map`'s `PolylineLayer` on the existing `FlutterMap` widget
+
+**Enabling technology:** `flutter_map` polyline layer (already imported) + OSRM public API (no key required) + `http` package (already in `pubspec.yaml`)
+
+---
+
+### 5 — Location History Timeline
+
+**What exists now:**
+Every GPS update in `LocationService.startTracking(uid)` writes `location` and `lastLocation` GeoPoints plus a `lastSeen` server timestamp to `users/{uid}`. The stream fires on every 10-metre movement but overwrites the same document rather than appending — so movement history is lost.
+
+**What needs to be added:**
+- In `LocationService.startTracking()`, alongside the existing `users/{uid}` update, add a secondary write to a subcollection: `users/{uid}/location_history/{timestamp}` with `{ location: GeoPoint, ts: serverTimestamp, accuracy, speed }`
+- Build a `TimelineView` screen that reads this subcollection ordered by `ts` and replays the user's path as an animated polyline on `flutter_map`
+- Useful for faculty tracking student movement during campus events or post-incident route reconstruction
+
+**Enabling technology:** Existing `geolocator` stream + one additional Firestore subcollection write in `LocationService` + `flutter_map` polyline layer
+
+---
+
+### 6 — iOS Full Support
+
+**What exists now:**
+The `ios/` folder structure is present in the project. `firebase_options.dart` contains the `DefaultFirebaseOptions.currentPlatform` switch but throws `UnsupportedError` for the iOS platform case. All Flutter/Dart logic in `lib/main.dart` is platform-agnostic and requires no changes.
+
+**What needs to be added:**
+- Configure `GoogleService-Info.plist` with Firebase iOS app credentials and add it to `ios/Runner/`
+- Fix the `UnsupportedError` iOS branch in `firebase_options.dart`
+- Add `CallKit` and `PushKit` entitlements for background VoIP call reception (required for WebRTC calls to wake the app on iOS)
+- Add iOS-specific permission strings (`NSLocationWhenInUseUsageDescription`, `NSMicrophoneUsageDescription`) to `Info.plist`
+
+**Enabling technology:** Apple Developer account + Firebase iOS SDK + CallKit/PushKit frameworks
+
+---
+
+### Development Roadmap
+
+| # | Enhancement | Complexity | Existing Leverage |
+|---|-------------|------------|-------------------|
+| 1 | FCM Push Notifications | Medium | Firebase project already live; `IncomingCallListener` logic reused |
+| 2 | Video Calls | Low | `flutter_webrtc` already integrated — one flag change + renderer widget |
+| 3 | Emergency SOS | Low | `ConnectionService.getConnectedUids()` + Firestore already wired |
+| 4 | Route Guidance | Low | `flutter_map` + `http` already in project; OSRM needs no API key |
+| 5 | Location Timeline | Low | `LocationService` stream already fires on every 10m move |
+| 6 | iOS Full Support | High | Folder structure exists; needs Apple Developer account |
 
 ## 🎓 Project Information
 
