@@ -101,63 +101,233 @@ General-purpose applications such as WhatsApp, Google Maps, and Find My Friends 
 ---
 
 ## ✨ Functional Requirements
+## ✅ Functional Requirements
+ 
+---
+ 
+### FR1 — User Registration with EmailJS OTP Verification + Firebase Auth
+ 
+**What the system does:**
+ 
+- User selects a role (Student / Faculty / Others) and enters their name, email, and password on the `AuthScreen`
+- A 6-digit OTP is generated client-side and dispatched via **EmailJS** (`api.emailjs.com/api/v1.0/email/send`) to the entered email address using service ID `service_dsy5vsd` and template ID `template_aerokdl`
+- The OTP is stored server-side in Firestore at `email_otps/{email}` with `otp`, `createdAt`, and `expiresAt` (5-minute TTL); expired OTP documents are auto-deleted after a failed verification attempt
+- Registration is blocked until the user enters the correct OTP (matched first against the in-memory generated value, then Firestore as fallback)
+- After verification, `FirebaseAuth.createUserWithEmailAndPassword` creates the account, and a profile document is written to Firestore `users/{uid}` with role-specific fields:
+  - **Student:** `firstName`, `lastName`, `email`, `phone`, `role`, `rollNumber`, `parentEmail`
+  - **Faculty:** `firstName`, `lastName`, `email`, `phone`, `role`, `employeeId`
+  - **Others:** `firstName`, `lastName`, `email`, `phone`, `role`
+- Login uses `FirebaseAuth.signInWithEmailAndPassword`; an active session is detected on app launch via `authStateChanges()` stream and routes directly to `HomeScreen` without re-login
+- Password reset sends a Firebase reset link via `sendPasswordResetEmail` through a dialog that captures the user's email address
+- Logout marks `isOnline: false` and `lastSeen` in Firestore, stops GPS tracking, then calls `FirebaseAuth.signOut()`
+**Acceptance criteria:** A new user can register, receive OTP by email, verify it, and reach `HomeScreen` within 60 seconds; profile written to Firestore `/users/{uid}`.
+ 
+---
+ 
+### FR2 — Real-Time GPS Tracking with 10m Distance Filter and Firestore Sync
+ 
+**What the system does:**
+ 
+- On first launch after login, the app requests `ACCESS_FINE_LOCATION` permission via the `permission_handler` package
+- The `geolocator` package streams GPS positions using `LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 10)` — updates only fire when the user physically moves ≥ 10 metres, which prevents idle Firestore writes and conserves battery
+- On every qualifying position update, the following fields are written to `users/{uid}` via `FirebaseFirestore.instance.collection('users').doc(uid).update(...)`:
+  - `location` (GeoPoint — current position)
+  - `lastLocation` (GeoPoint — retained as offline fallback)
+  - `isOnline: true`
+  - `lastSeen` (FieldValue.serverTimestamp)
+  - `accuracy` (metres)
+  - `speed` (m/s)
+- `AppLifecycleObserver` (extends `WidgetsBindingObserver`) manages tracking lifecycle:
+  - `AppLifecycleState.resumed` → `LocationService.startTracking(uid)` restarts the stream
+  - `AppLifecycleState.paused` / `AppLifecycleState.detached` → stream cancelled; `isOnline: false` + `lastSeen` written to Firestore
+**Acceptance criteria:** Location updates reflect on the map within 15 seconds of a user moving ≥ 10 metres.
+ 
+---
+ 
+### FR3 — Nearby User Detection with 4-Tier Proximity Classification and Interactive Map
+ 
+**What the system does:**
+ 
+- The `_NearbyTab` streams all documents from the Firestore `users` collection in real time and calculates distance from the current user's position to each other user using `Geolocator.distanceBetween()` (Haversine formula)
+- `VerilogDistanceRanker.rank()` classifies each result into one of 4 priority tiers:
+  | Tier | Distance Range | Badge Colour | Meaning |
+  |------|---------------|--------------|---------|
+  | `nearest` | < 100 m | 🟢 Green | Immediately reachable |
+  | `close` | 100–499 m | 🔵 Blue | Nearby — can arrive quickly |
+  | `moderate` | 500–1999 m | 🟡 Amber | On campus — reachable within minutes |
+  | `far` | ≥ 2000 m | 🔴 Red | Far — last resort |
+- The `_NearbyTab` renders an interactive **OpenStreetMap** tile map via `flutter_map` + `latlong2` with role-coloured, initialled markers for every user:
+  - Green = self · Blue = Student · Purple = Faculty · Amber = Others · Grey = offline user
+- Tapping a marker opens a dialog showing the user's name, role, online status, last-seen time, and reverse-geocoded place name (cached in-memory via `GeocodingHelper._cache` to avoid redundant geocoding calls)
+- Offline users remain visible on the map at their `lastLocation` (fallback via the `displayLocation` getter: `lastLocation ?? location`)
+- A scrollable ranked list below the map shows each user's distance text, proximity badge colour, and online/offline indicator
+**Acceptance criteria:** Nearby users appear on the map within 5 seconds of opening `_NearbyTab`; each user shows the correct proximity tier badge.
+ 
+---
+ 
+### FR4 — Bidirectional Connection Management with Real-Time Notifications
+ 
+**What the system does:**
+ 
+- Any authenticated user can send a connection request from `_FindPeopleTab`; this writes to `connection_requests/{doc}` with fields: `fromUid`, `fromName`, `toUid`, `toName`, `status: 'pending'`, `createdAt`
+- A notification badge on the `PeopleScreen` AppBar shows a live count of pending incoming requests via a Firestore stream filtered by `toUid == myUid` and `status == 'pending'`
+- A bottom-sheet panel lists all pending requests with Accept and Decline buttons
+- **Accepting** creates a symmetric document at `connections/{fromUid}_{toUid}` containing a `users: [uid1, uid2]` array and `createdAt`; **Declining** updates `status` to `'rejected'`
+- Location viewing, in-app chat, and voice calls are gated behind a mutual connection check via `ConnectionService.areMutuallyConnected(myUid, otherUid)` — non-connected users see a "Location Access Restricted" screen instead of the live map
+**Acceptance criteria:** A connection request is visible to the recipient in real time; accepting it results in both users appearing on each other's Nearby tab and gaining access to chat and location.
+ 
+---
+ 
+### FR5 — Campus-Wide User Search with Connection Status and Distance Display
+ 
+**What the system does:**
+ 
+- `_FindPeopleTab` streams all Firestore `users` documents and filters results client-side using a case-insensitive search field matching against `fullName`, `role`, `rollNumber`, and `email`
+- Each result tile displays: name, role, roll number (if Student), online/offline dot indicator, last-seen time, and distance in metres/km (if already connected)
+- If already connected: a **"View Location"** button navigates to `_PersonLocationScreen`
+- If not connected and no request sent: a **"Connect"** button writes a connection request to Firestore; after tapping it changes to an orange **"Requested"** chip
+- Connection and request state is checked per tile via `ConnectionService.areMutuallyConnected` and a `connection_requests` Firestore query, then cached per session to limit reads
+**Acceptance criteria:** Search results appear within 2 seconds; connection state (connected / requested / none) is correctly reflected per tile.
+ 
+---
+ 
+### FR6 — AI-Powered Helper Recommendation via Claude API
+ 
+**What the system does:**
+ 
+- On `_PersonLocationScreen`, tapping **"Find Help"** collects up to 5 nearby connected users ranked by `VerilogDistanceRanker.rank()`
+- `AiDecisionEngine.getSuggestions()` sends a structured prompt to the **Anthropic API** (`POST https://api.anthropic.com/v1/messages`, model `claude-sonnet-4-20250514`, `max_tokens: 1000`) with each nearby user's name, role, distance text, proximity tier, online status, and last-seen time
+- The prompt instructs Claude to return a **JSON array only** (no markdown, no backticks); each item contains `uid`, `action` (`call` or `message`), `reason` (one sentence), and `messageTemplate` (ready-to-send text)
+- The response is parsed into `AiSuggestion` objects and displayed as actionable suggestion cards showing: recommended person, their distance and location, Claude's reason, the message template, and a one-tap call or chat button
+- If the API call fails or returns a non-200 status, a local fallback activates automatically: online users → `call`, offline users → `message` with a generic template
+- The Anthropic API key is never hardcoded — it is loaded at runtime from a `.env` file via `flutter_dotenv`
+**Acceptance criteria:** AI recommendation renders within 5 seconds; the recommended user is the closest available active connection; fallback activates without crashing if API is unreachable.
+ 
+---
+ 
+### FR7 — Peer-to-Peer Voice Calls via flutter_webrtc and Firestore Signalling
+ 
+**What the system does:**
+ 
+The `CallService` class implements a full WebRTC audio call lifecycle backed by Firestore signalling at `calls/{chatId}`:
+ 
+1. **Caller** (`startCall`): captures microphone audio via `getUserMedia({audio: true, video: false})`, creates an `RTCPeerConnection`, generates an SDP offer, and writes `offer`, `callerUid`, `calleeUid`, `status: 'ringing'` to the call document; ICE candidates are written to the `callerCandidates` sub-collection
+2. **Callee** (`answerCall`): reads the offer SDP, creates an SDP answer, writes it back with `status: 'active'`; ICE candidates are written to `calleeCandidates`
+3. **STUN servers:** `stun.l.google.com:19302` and `stun1.l.google.com:19302`
+4. **Hang-up** (`hangUp`): peer connection is closed, media stream is disposed, call document status set to `'ended'`
+5. **Mute toggle** (`toggleMute`): enables/disables the local audio track without dropping the connection
+6. The `InAppCallScreen` shows caller/callee name and role, a live call-duration timer (updates every second via `Timer.periodic`), mute button, and hang-up button
+7. Required Android permissions: `RECORD_AUDIO`, `BLUETOOTH`, `BLUETOOTH_CONNECT` declared in `AndroidManifest.xml`
+**Acceptance criteria:** Caller and callee establish two-way audio; mute and hang-up work; call status progresses idle → ringing → active → ended; remote hang-up dismisses the local call screen automatically.
+ 
+---
+ 
+### FR8 — Real-Time In-App Text Chat with Read Receipts and Unread Badges
+ 
+**What the system does:**
+ 
+- Messages are stored at `chats/{chatId}/messages` where `chatId` is the lexicographically sorted UID pair (`ChatService.chatId(a, b)` → `[a,b].sort().join('_')`)
+- Each message document contains: `from` (uid), `text`, `ts` (server timestamp), `read` (bool)
+- The `InAppChatScreen` streams messages ordered by `ts` ascending via `messageStream()` and auto-scrolls to the latest message on each update
+- Sent messages are right-aligned in primary blue; received messages are left-aligned in white; timestamp is shown per bubble
+- On opening a chat, `ChatService.markRead()` batch-updates all unread messages from the peer to `read: true` via a Firestore batch commit
+- The `_ConnectionsTab` renders a live unread badge count per contact via `ChatService.unreadStream()` — a Firestore stream filtered by `from == peerUid` and `read == false`
+- Every send also updates the parent `chats/{chatId}` document with `lastMessage`, `lastTs`, and `lastFrom`
+**Acceptance criteria:** Messages appear in real time for both parties; read receipts clear on opening chat; unread badge count updates live on the Connections tab.
+ 
+---
+ 
+### FR9 — Global Incoming Call Listener with Root-Navigator Overlay
+ 
+**What the system does:**
+ 
+- `IncomingCallListener` is a `StatefulWidget` that wraps the entire `HomeScreen` Scaffold (not just the body), subscribing to the Firestore `calls` collection filtered by `calleeUid == currentUser.uid` and `status == 'ringing'`
+- On detecting a ringing call, it fetches the caller's profile from Firestore and presents an `AlertDialog` using `Navigator.of(context, rootNavigator: true)` — this ensures the dialog appears above all navigation routes and tab stacks
+- The dialog displays the caller's name, role, and initials avatar with **Answer** and **Decline** buttons
+- **Answering** navigates to `InAppCallScreen(peer: caller, isOutgoing: false)` via `rootNavigator: true`
+- **Declining** updates `status` to `'ended'` in the call Firestore document
+- A `_dialogShown` guard prevents duplicate dialogs if the stream fires multiple times
+**Acceptance criteria:** An incoming call triggers a full-screen overlay on the callee's device regardless of which tab or screen they are viewing.
+ 
+---
+ 
+### FR10 — App Lifecycle Observer with Automatic Online/Offline Management
+ 
+**What the system does:**
+ 
+- `AppLifecycleObserver extends WidgetsBindingObserver` is registered in `_CampusLocatorAppState` when a user is authenticated; deregistered on logout or app disposal
+- `AppLifecycleState.resumed` → `LocationService.startTracking(uid)` restarts the GPS stream
+- `AppLifecycleState.paused` or `AppLifecycleState.detached` → `LocationService.stopTracking()` cancels the stream; `LocationService.goOffline(uid)` writes `isOnline: false` + `lastSeen` to Firestore
+- The same offline update fires on explicit logout before `FirebaseAuth.signOut()` is called
+- Offline users continue to appear on all maps via the `displayLocation` getter (`lastLocation ?? location`) and the `LastSeenHelper.format()` utility
+**Acceptance criteria:** Closing or backgrounding the app marks the user offline within seconds; reopening the app resumes tracking and marks them online automatically.
+ 
+---
+ 
+## ⚙️ Non-Functional Requirements
+ 
+---
+ 
+### NFR1 — Performance
+ 
+- Location updates fire only on ≥ 10m physical movement (distance-filter stream, not a polling timer) — Firestore write frequency is bounded by movement, not time
+- Geocoding results are cached in-memory (`GeocodingHelper._cache`) using a `lat/lng` key rounded to 4 decimal places, avoiding redundant reverse-geocoding calls for stationary users
+- AI helper response target: within 5 seconds (`max_tokens: 1000` limits response size)
+- OTP delivery uses a 15-second HTTP timeout (`http.post(...).timeout(Duration(seconds: 15))`)
+- Connection and request state per `_FindTile` is cached per session to minimise Firestore reads on list scroll
+---
+ 
+### NFR2 — Security
+ 
+- The Anthropic API key is loaded at runtime from a `.env` file via `flutter_dotenv` and is never hardcoded in source — the `.env` file is listed in `.gitignore`
+- OTPs are stored server-side in Firestore with a 5-minute expiry (`expiresAt` field); expired documents are deleted after a failed match
+- The `role` and `email` fields are locked post-registration — the `ProfileEditScreen` does not expose them for editing
+- Location data, chat history, and voice calls are only accessible between mutually connected users, enforced in app logic via `ConnectionService.areMutuallyConnected`
+**Firestore Security Rules (enforced server-side):**
+ 
+| Collection | Rule |
+|---|---|
+| `/users/{uid}` | Any authenticated user can read; write only by owner UID |
+| `/connections`, `/connection_requests` | Any authenticated user can read and write |
+| `/email_otps/{doc}` | Public read/write (required for pre-auth OTP flow) |
+| `/chats/{chatId}` | Read/write only if `request.auth.uid in resource.data.participants` |
+| `/calls` + sub-collections | Any authenticated user |
+ 
+---
+ 
+### NFR3 — Battery Efficiency
+ 
+- GPS uses `distanceFilter: 10` — zero Firestore writes occur when the user is stationary
+- The `LocationService._subscription` is cancelled immediately on app pause/detach, preventing background GPS drain
+---
+ 
+### NFR4 — Reliability
+ 
+- `lastLocation` fallback ensures offline users always appear on the map at their last known GPS fix
+- WebRTC call state is monitored via a Firestore `snapshots()` listener; if the remote peer ends the call, the local `InAppCallScreen` pops itself automatically (`_hangUp(remote: true)`)
+- AI suggestion fallback (`AiDecisionEngine._fallback()`) activates locally without any network dependency if the Claude API call fails or returns a non-200 response
+---
+ 
+### NFR5 — Multi-Role Support
+ 
+Three user roles with role-specific behaviour throughout the app:
+ 
+| Aspect | Student | Faculty | Others |
+|---|---|---|---|
+| Profile fields | `rollNumber`, `parentEmail` | `employeeId` | name + phone only |
+| UI accent colour | Blue (`#1E3A8A`) | Purple (`#8B5CF6`) | Amber (`#F59E0B`) |
+| Map marker colour | Blue | Purple | Amber |
+| Role icon | `school_rounded` | `menu_book_rounded` | `people_rounded` |
+ 
+---
+ 
+### NFR6 — Platform Support
+ 
+- **Primary platform:** Android (fully configured — `AndroidManifest.xml` declares `ACCESS_FINE_LOCATION`, `ACCESS_BACKGROUND_LOCATION`, `RECORD_AUDIO`, `BLUETOOTH`, `BLUETOOTH_CONNECT`, `INTERNET`)
+- **iOS:** Project structure exists (`ios/` folder present, `GoogleService-Info.plist` slot exists) but `firebase_options.dart` throws `UnsupportedError` for iOS at runtime — iOS deployment is **not yet complete**
+- **Flutter SDK:** `>=3.0.0 <4.0.0` (as declared in `pubspec.yaml`)
+---
 
-### FR-01 · User Registration & Authentication
-- Users register with name, campus block, and email address
-- A one-time password (OTP) is dispatched via **EmailJS** to verify the email before account creation
-- On successful OTP entry, a Firebase Auth session is created and the user profile is written to Firestore under `/users/{uid}`
-- Subsequent logins reuse the active Firebase session; OTP re-verification is triggered on session expiry
-- **Acceptance criteria:** A new user can register, receive OTP, verify, and reach `HomeScreen` within 60 seconds; profile written to Firestore `/users/{uid}`
-
-### FR-02 · Real-Time Location Tracking
-- On first launch (post-login), the app requests `ACCESS_FINE_LOCATION` and `ACCESS_BACKGROUND_LOCATION` via `permission_handler`
-- The `geolocator` package streams GPS using a **10-metre distance filter** (not a timer) — updates fire only when the user moves 10m, saving battery. Both `location` (current) and `lastLocation` (fallback) GeoPoints are written to Firestore
-- `geocoding` converts raw coordinates into a human-readable campus address (block / building level)
-- The `_NearbyTab` map (powered by `flutter_map` + OpenStreetMap tiles + `latlong2`) renders live user markers updating in real time via Firestore stream
-- **Acceptance criteria:** Location updates reflect on the map within 15 seconds of a user moving
-
-### FR-03 · Nearby User Detection
-- The proximity engine queries Firestore for all users whose stored coordinates fall within a configurable radius (default: **100 metres**), calculated using the Haversine formula
-- Results are filtered to **trusted connections only** — users present in `/connections/{uid}/list`
-- `VerilogDistanceRanker.rank()` applies the Haversine formula and classifies each result: **Nearest** (<100m, green), **Close** (<500m, blue), **Moderate** (<2km, amber), **Far** (≥2km, red)
-- The `_NearbyTab` displays each match as a map marker with name label, priority badge, and distance text
-- **Acceptance criteria:** At least 3 nearby users (within 100m) appear on the map within 5 seconds of opening `_NearbyTab`
-
-### FR-04 · Friend Search
-- `_FindPeopleTab` exposes a name-based search field that queries the `/users` Firestore collection using prefix matching
-- Results display name, role, last-seen timestamp, and distance (if location available)
-- Users can send a connection request from the result card; the request is written to `/connection_requests`; recipients see it in `_ConnectionsTab`
-- **Acceptance criteria:** A search query returns results within 2 seconds; a connection request is visible to the recipient on their Connections tab
-
-### FR-05 · Connections Management
-- `_ConnectionsTab` streams `/connections` where `users arrayContains myUid`, resolving each peer UID to a full `CampusPerson` profile in real time
-- Users can add (via search), remove, or block connections
-- Connections are bidirectional — both users must accept before location sharing is activated
-- **Acceptance criteria:** Adding a connection and having the peer accept results in both users appearing on each other's `_NearbyTab`
-
-### FR-06 · AI-Powered Helper Recommendation
-- When a user triggers "Find Help", the app collects the top nearby connected users with name, distance, and connection status
-- A structured prompt is sent to the **Claude API (Anthropic)** via `http` REST call to `/v1/messages`
-- Claude ranks candidates by proximity and trust level and returns a natural-language recommendation
-- The result is displayed as an action card on `_NearbyTab` with a one-tap call/message button
-- **Acceptance criteria:** AI recommendation returns and renders within 5 seconds of trigger; recommended user is the closest active connection
-
-### FR-07 · Voice Calls (WebRTC)
-- `CallService.startCall()` creates an RTCPeerConnection, captures local audio via `flutter_webrtc`, and writes the WebRTC offer SDP to Firestore `/calls/{chatId}`
-- ICE candidates are exchanged via Firestore subcollections (`/callerCandidates`, `/calleeCandidates`) using STUN servers (`stun.l.google.com:19302`)
-- The callee's `IncomingCallListener` detects the ringing state via Firestore stream and pushes `CallScreen` using `rootNavigator`
-- `CallService.answerCall()` reads the offer, creates an answer SDP, and completes the WebRTC handshake
-- `CallService.hangUp()` closes the peer connection, disposes the media stream, and marks the call `ended` in Firestore
-- `CallService.toggleMute()` enables/disables the local audio track without dropping the call
-- The `RECORD_AUDIO` permission is declared in AndroidManifest; `BLUETOOTH`/`BLUETOOTH_CONNECT` permissions enable headset routing
-- **Acceptance criteria:** Caller and callee establish a two-way audio connection; mute and hang-up controls work; call status transitions idle → ringing → active → ended
-
-### FR-08 · Firebase Security & Data Integrity
-- `/users/{uid}` — read and write restricted to the authenticated owner UID only
-- `/connections` — read and write open to any authenticated user (required for mutual connection requests)
-- `/email_otps/{doc}` — public read/write (required for unauthenticated OTP verification flow before Firebase Auth session exists)
-- All rules enforced server-side via Firestore Security Rules — client cannot bypass them
-- **Acceptance criteria:** An unauthenticated request to `/users` write path returns `PERMISSION_DENIED`; chat read is blocked unless `request.auth.uid in resource.data.participants`
 
 ---
 
