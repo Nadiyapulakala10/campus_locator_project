@@ -1,8 +1,13 @@
-// Campus Locator — COMPLETE VERSION (FIXED)
+// Campus Locator — COMPLETE VERSION (ALL BUGS FIXED)
 // Fixes applied:
-// 1. IncomingCallListener now wraps the entire Scaffold (not FutureBuilder body)
-// 2. Navigator.of(context, rootNavigator: true) used in IncomingCallListener
-// 3. forgotPassword context captured before async gap
+// 1. Claude model identifier loaded from .env (was hardcoded wrong string)
+// 2. EmailJS credentials loaded from .env (were hardcoded in source)
+// 3. IncomingCallListener tracks callDocId instead of boolean flag
+// 4. CallService closes existing PC before creating a new one (static state conflict)
+// 5. Microphone permission checked via permission_handler before getUserMedia
+// 6. IncomingCallListener wraps entire Scaffold (not FutureBuilder body)
+// 7. Navigator.of(context, rootNavigator: true) used in IncomingCallListener
+// 8. forgotPassword context captured before async gap
 
 import 'dart:async';
 import 'dart:convert';
@@ -19,20 +24,29 @@ import 'package:geocoding/geocoding.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'firebase_options.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // ─────────────────────────────────────────
 //  CONFIGS
 // ─────────────────────────────────────────
+
+// FIX 2: EmailJS credentials now loaded from .env instead of hardcoded
 class EmailJSConfig {
-  static const String serviceId = 'service_dsy5vsd';
-  static const String templateId = 'template_aerokdl';
-  static const String publicKey = 'P-pVR3ARVBslX4frp';
+  static String get serviceId => dotenv.env['EMAILJS_SERVICE_ID'] ?? '';
+  static String get templateId => dotenv.env['EMAILJS_TEMPLATE_ID'] ?? '';
+  static String get publicKey => dotenv.env['EMAILJS_PUBLIC_KEY'] ?? '';
 }
 
+// FIX 1: Claude model identifier now loaded from .env
+// Add to your .env:
+//   ANTHROPIC_API_KEY=your_key_here
+//   ANTHROPIC_MODEL=claude-sonnet-4-5
 class AnthropicConfig {
   static String get apiKey => dotenv.env['ANTHROPIC_API_KEY'] ?? '';
+  static String get model =>
+      dotenv.env['ANTHROPIC_MODEL'] ?? 'claude-sonnet-4-5';
 }
 
 // ─────────────────────────────────────────
@@ -86,8 +100,10 @@ class GeocodingHelper {
     final key = '${lat.toStringAsFixed(4)},${lng.toStringAsFixed(4)}';
     if (_cache.containsKey(key)) return _cache[key]!;
     try {
-      final placemarks = await placemarkFromCoordinates(lat, lng)
-          .timeout(const Duration(seconds: 5));
+      final placemarks = await placemarkFromCoordinates(
+        lat,
+        lng,
+      ).timeout(const Duration(seconds: 5));
       if (placemarks.isNotEmpty) {
         final p = placemarks.first;
         final parts = <String>[];
@@ -130,8 +146,11 @@ class ContactHelper {
     }
   }
 
-  static Future<void> sendSMS(BuildContext context, String? phone,
-      {String message = ''}) async {
+  static Future<void> sendSMS(
+    BuildContext context,
+    String? phone, {
+    String message = '',
+  }) async {
     if (phone == null || phone.trim().isEmpty) {
       _showNoPhone(context);
       return;
@@ -150,18 +169,22 @@ class ContactHelper {
 
   static void _showNoPhone(BuildContext context) {
     ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: const Row(children: [
-        Icon(Icons.info_rounded, color: Colors.white, size: 18),
-        SizedBox(width: 8),
-        Expanded(child: Text('No phone number saved for this person.')),
-      ]),
-      backgroundColor: AppColors.primary,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      margin: const EdgeInsets.all(16),
-      duration: const Duration(seconds: 4),
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Row(
+          children: [
+            Icon(Icons.info_rounded, color: Colors.white, size: 18),
+            SizedBox(width: 8),
+            Expanded(child: Text('No phone number saved for this person.')),
+          ],
+        ),
+        backgroundColor: AppColors.primary,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.all(16),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 }
 
@@ -180,14 +203,17 @@ class LocationService {
     }
     if (perm == LocationPermission.deniedForever) return null;
     return await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.high);
+      desiredAccuracy: LocationAccuracy.high,
+    );
   }
 
   static void startTracking(String uid) {
     _subscription?.cancel();
     _subscription = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high, distanceFilter: 10),
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 10,
+      ),
     ).listen((pos) {
       FirebaseFirestore.instance.collection('users').doc(uid).update({
         'location': GeoPoint(pos.latitude, pos.longitude),
@@ -244,7 +270,9 @@ class AppLifecycleObserver extends WidgetsBindingObserver {
 // ─────────────────────────────────────────
 class ConnectionService {
   static Future<bool> areMutuallyConnected(
-      String myUid, String otherUid) async {
+    String myUid,
+    String otherUid,
+  ) async {
     final q1 = await FirebaseFirestore.instance
         .collection('connections')
         .doc('${myUid}_$otherUid')
@@ -281,7 +309,9 @@ class ChatService {
   }
 
   static CollectionReference<Map<String, dynamic>> messagesRef(
-      String myUid, String otherUid) {
+    String myUid,
+    String otherUid,
+  ) {
     return FirebaseFirestore.instance
         .collection('chats')
         .doc(chatId(myUid, otherUid))
@@ -311,17 +341,20 @@ class ChatService {
   }
 
   static Stream<QuerySnapshot<Map<String, dynamic>>> messageStream(
-      String myUid, String otherUid) {
-    return messagesRef(myUid, otherUid)
-        .orderBy('ts', descending: false)
-        .snapshots();
+    String myUid,
+    String otherUid,
+  ) {
+    return messagesRef(
+      myUid,
+      otherUid,
+    ).orderBy('ts', descending: false).snapshots();
   }
 
   static Future<void> markRead(String myUid, String otherUid) async {
-    final snap = await messagesRef(myUid, otherUid)
-        .where('from', isEqualTo: otherUid)
-        .where('read', isEqualTo: false)
-        .get();
+    final snap = await messagesRef(
+      myUid,
+      otherUid,
+    ).where('from', isEqualTo: otherUid).where('read', isEqualTo: false).get();
     final batch = FirebaseFirestore.instance.batch();
     for (final doc in snap.docs) {
       batch.update(doc.reference, {'read': true});
@@ -340,6 +373,9 @@ class ChatService {
 
 // ─────────────────────────────────────────
 //  WEBRTC CALL SERVICE
+//  FIX 4: Close existing PC before creating a new one to prevent
+//  static state conflict when concurrent calls overlap.
+//  FIX 5: Check microphone permission before getUserMedia.
 // ─────────────────────────────────────────
 class CallService {
   static RTCPeerConnection? _pc;
@@ -349,16 +385,38 @@ class CallService {
     'iceServers': [
       {'urls': 'stun:stun.l.google.com:19302'},
       {'urls': 'stun:stun1.l.google.com:19302'},
-    ]
+    ],
   };
 
+  // FIX 5: Request microphone permission before calling getUserMedia
   static Future<MediaStream> _getLocalAudio() async {
-    return await navigator.mediaDevices
-        .getUserMedia({'audio': true, 'video': false});
+    final status = await Permission.microphone.request();
+    if (status.isDenied || status.isPermanentlyDenied) {
+      throw Exception(
+        'Microphone permission denied. Please allow microphone access in settings.',
+      );
+    }
+    return await navigator.mediaDevices.getUserMedia({
+      'audio': true,
+      'video': false,
+    });
+  }
+
+  // FIX 4: Helper to safely tear down any existing connection
+  static Future<void> _closeExisting() async {
+    if (_pc != null) {
+      await _pc!.close();
+      _pc = null;
+    }
+    if (_localStream != null) {
+      await _localStream!.dispose();
+      _localStream = null;
+    }
   }
 
   static Future<RTCPeerConnection> _createPc(
-      void Function(RTCIceCandidate) onIce) async {
+    void Function(RTCIceCandidate) onIce,
+  ) async {
     final pc = await createPeerConnection(_iceConfig);
     pc.onIceCandidate = (c) {
       if (c.candidate != null) onIce(c);
@@ -367,6 +425,9 @@ class CallService {
   }
 
   static Future<void> startCall(String myUid, String peerUid) async {
+    // FIX 4: Always close existing before starting new
+    await _closeExisting();
+
     final ref = FirebaseFirestore.instance
         .collection('calls')
         .doc(ChatService.chatId(myUid, peerUid));
@@ -399,8 +460,9 @@ class CallService {
       final data = snap.data();
       if (data?['answer'] != null &&
           _pc?.signalingState != RTCSignalingState.RTCSignalingStateStable) {
-        await _pc!.setRemoteDescription(RTCSessionDescription(
-            data!['answer']['sdp'], data['answer']['type']));
+        await _pc!.setRemoteDescription(
+          RTCSessionDescription(data!['answer']['sdp'], data['answer']['type']),
+        );
       }
     });
 
@@ -409,13 +471,17 @@ class CallService {
         if (ch.type == DocumentChangeType.added) {
           final d = ch.doc.data()!;
           _pc!.addCandidate(
-              RTCIceCandidate(d['candidate'], d['sdpMid'], d['sdpMLineIndex']));
+            RTCIceCandidate(d['candidate'], d['sdpMid'], d['sdpMLineIndex']),
+          );
         }
       }
     });
   }
 
   static Future<void> answerCall(String myUid, String callerUid) async {
+    // FIX 4: Always close existing before answering
+    await _closeExisting();
+
     final ref = FirebaseFirestore.instance
         .collection('calls')
         .doc(ChatService.chatId(callerUid, myUid));
@@ -434,8 +500,12 @@ class CallService {
     }
 
     final callData = (await ref.get()).data()!;
-    await _pc!.setRemoteDescription(RTCSessionDescription(
-        callData['offer']['sdp'], callData['offer']['type']));
+    await _pc!.setRemoteDescription(
+      RTCSessionDescription(
+        callData['offer']['sdp'],
+        callData['offer']['type'],
+      ),
+    );
 
     final answer = await _pc!.createAnswer();
     await _pc!.setLocalDescription(answer);
@@ -450,7 +520,8 @@ class CallService {
         if (ch.type == DocumentChangeType.added) {
           final d = ch.doc.data()!;
           _pc!.addCandidate(
-              RTCIceCandidate(d['candidate'], d['sdpMid'], d['sdpMLineIndex']));
+            RTCIceCandidate(d['candidate'], d['sdpMid'], d['sdpMLineIndex']),
+          );
         }
       }
     });
@@ -612,13 +683,18 @@ class VerilogDistanceRanker {
     return persons.where((p) => p.displayLocation != null).map((p) {
       final gp = p.displayLocation!;
       final d = Geolocator.distanceBetween(
-          target.latitude, target.longitude, gp.latitude, gp.longitude);
+        target.latitude,
+        target.longitude,
+        gp.latitude,
+        gp.longitude,
+      );
       final prio = encode(d);
       return DistanceResult(
-          person: p,
-          distanceMeters: d,
-          priority: prio,
-          priorityLabel: priorityLabel(prio));
+        person: p,
+        distanceMeters: d,
+        priority: prio,
+        priorityLabel: priorityLabel(prio),
+      );
     }).toList()
       ..sort((a, b) => a.distanceMeters.compareTo(b.distanceMeters));
   }
@@ -626,13 +702,15 @@ class VerilogDistanceRanker {
 
 // ─────────────────────────────────────────
 //  AI DECISION ENGINE
+//  FIX 1: Model identifier now comes from AnthropicConfig.model (.env)
 // ─────────────────────────────────────────
 class AiDecisionEngine {
   static const _endpoint = 'https://api.anthropic.com/v1/messages';
-  static const _model = 'claude-sonnet-4-20250514';
 
   static Future<List<AiSuggestion>> getSuggestions(
-      List<DistanceResult> ranked, CampusPerson targetPerson) async {
+    List<DistanceResult> ranked,
+    CampusPerson targetPerson,
+  ) async {
     if (ranked.isEmpty) return [];
 
     final ctx = ranked.take(5).map((r) {
@@ -667,10 +745,10 @@ Respond ONLY with valid JSON array — no markdown, no backticks:
           'anthropic-version': '2023-06-01',
         },
         body: jsonEncode({
-          'model': _model,
+          'model': AnthropicConfig.model, // FIX 1: from .env
           'max_tokens': 1000,
           'messages': [
-            {'role': 'user', 'content': prompt}
+            {'role': 'user', 'content': prompt},
           ],
         }),
       );
@@ -693,12 +771,14 @@ Respond ONLY with valid JSON array — no markdown, no backticks:
           (r) => r.person.uid == uid,
           orElse: () => ranked[suggestions.length % ranked.length],
         );
-        suggestions.add(AiSuggestion(
-          action: item['action'] ?? 'message',
-          reason: item['reason'] ?? '',
-          messageTemplate: item['messageTemplate'] ?? '',
-          target: matched,
-        ));
+        suggestions.add(
+          AiSuggestion(
+            action: item['action'] ?? 'message',
+            reason: item['reason'] ?? '',
+            messageTemplate: item['messageTemplate'] ?? '',
+            target: matched,
+          ),
+        );
       }
       return suggestions;
     } catch (_) {
@@ -756,17 +836,21 @@ class _PlaceNameWidgetState extends State<_PlaceNameWidget> {
       return;
     }
     final name = await GeocodingHelper.getPlaceName(
-        widget.geoPoint!.latitude, widget.geoPoint!.longitude);
+      widget.geoPoint!.latitude,
+      widget.geoPoint!.longitude,
+    );
     if (mounted) setState(() => _name = name);
   }
 
   @override
   Widget build(BuildContext context) {
-    return Text(_name,
-        style: widget.style ??
-            const TextStyle(fontSize: 12, color: Colors.black54),
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis);
+    return Text(
+      _name,
+      style:
+          widget.style ?? const TextStyle(fontSize: 12, color: Colors.black54),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    );
   }
 }
 
@@ -787,27 +871,42 @@ class _OfflineBadge extends StatelessWidget {
     if (compact) {
       return Padding(
         padding: const EdgeInsets.only(top: 3),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          const Icon(Icons.access_time_rounded,
-              size: 11, color: AppColors.offlineGrey),
-          const SizedBox(width: 3),
-          Text(ls,
-              style:
-                  const TextStyle(fontSize: 10, color: AppColors.offlineGrey)),
-          if (gp != null) ...[
-            const SizedBox(width: 6),
-            const Icon(Icons.location_on_outlined,
-                size: 11, color: AppColors.offlineGrey),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.access_time_rounded,
+              size: 11,
+              color: AppColors.offlineGrey,
+            ),
             const SizedBox(width: 3),
-            Flexible(
-              child: _PlaceNameWidget(
-                geoPoint: gp,
-                style:
-                    const TextStyle(fontSize: 10, color: AppColors.offlineGrey),
+            Text(
+              ls,
+              style: const TextStyle(
+                fontSize: 10,
+                color: AppColors.offlineGrey,
               ),
             ),
+            if (gp != null) ...[
+              const SizedBox(width: 6),
+              const Icon(
+                Icons.location_on_outlined,
+                size: 11,
+                color: AppColors.offlineGrey,
+              ),
+              const SizedBox(width: 3),
+              Flexible(
+                child: _PlaceNameWidget(
+                  geoPoint: gp,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: AppColors.offlineGrey,
+                  ),
+                ),
+              ),
+            ],
           ],
-        ]),
+        ),
       );
     }
 
@@ -819,43 +918,63 @@ class _OfflineBadge extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: AppColors.offlineGrey.withOpacity(0.2)),
       ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          const Icon(Icons.access_time_rounded,
-              size: 13, color: AppColors.offlineGrey),
-          const SizedBox(width: 5),
-          Text('Last seen: $ls',
-              style: const TextStyle(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.access_time_rounded,
+                size: 13,
+                color: AppColors.offlineGrey,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                'Last seen: $ls',
+                style: const TextStyle(
                   fontSize: 12,
                   color: AppColors.offlineGrey,
-                  fontWeight: FontWeight.w500)),
-        ]),
-        if (gp != null) ...[
-          const SizedBox(height: 5),
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Icon(Icons.location_on_outlined,
-                size: 13, color: AppColors.offlineGrey),
-            const SizedBox(width: 5),
-            Expanded(
-              child: _PlaceNameWidget(
-                geoPoint: gp,
-                style: const TextStyle(
-                    fontSize: 12,
-                    color: AppColors.offlineGrey,
-                    fontWeight: FontWeight.w500),
+                  fontWeight: FontWeight.w500,
+                ),
               ),
+            ],
+          ),
+          if (gp != null) ...[
+            const SizedBox(height: 5),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(
+                  Icons.location_on_outlined,
+                  size: 13,
+                  color: AppColors.offlineGrey,
+                ),
+                const SizedBox(width: 5),
+                Expanded(
+                  child: _PlaceNameWidget(
+                    geoPoint: gp,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.offlineGrey,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ]),
+          ],
         ],
-      ]),
+      ),
     );
   }
 }
 
 // ─────────────────────────────────────────
-//  INCOMING CALL LISTENER — FIX 1 & 2
-//  Now uses rootNavigator so it can push
-//  from anywhere in the tree safely.
+//  INCOMING CALL LISTENER
+//  FIX 3: Track active callDocId instead of boolean _dialogShown flag.
+//         This prevents stale state when the Firestore stream reconnects
+//         and correctly handles new calls after a previous one ends.
+//  Also uses rootNavigator: true for dialog/navigation (original fix).
 // ─────────────────────────────────────────
 class IncomingCallListener extends StatefulWidget {
   final Widget child;
@@ -866,7 +985,9 @@ class IncomingCallListener extends StatefulWidget {
 
 class _IncomingCallListenerState extends State<IncomingCallListener> {
   StreamSubscription? _sub;
-  bool _dialogShown = false;
+
+  // FIX 3: Track by document ID, not a boolean
+  String? _activeCallDocId;
 
   @override
   void initState() {
@@ -881,12 +1002,17 @@ class _IncomingCallListenerState extends State<IncomingCallListener> {
         .snapshots()
         .listen((snap) {
       if (snap.docs.isEmpty) {
-        _dialogShown = false;
+        // FIX 3: Reset when no ringing docs (call ended / declined)
+        _activeCallDocId = null;
         return;
       }
-      if (_dialogShown) return;
-      _dialogShown = true;
+
       final doc = snap.docs.first;
+
+      // FIX 3: Skip if we are already showing a dialog for this exact call
+      if (_activeCallDocId == doc.id) return;
+
+      _activeCallDocId = doc.id;
       final callerUid = doc['callerUid'] as String;
       _showIncomingDialog(callerUid, doc.id);
     });
@@ -900,44 +1026,60 @@ class _IncomingCallListenerState extends State<IncomingCallListener> {
     if (!callerDoc.exists || !mounted) return;
     final caller = CampusPerson.fromFirestore(callerUid, callerDoc.data()!);
 
-    // Use rootNavigator: true so the dialog sits above all routes
     showDialog(
       context: context,
       useRootNavigator: true,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Row(children: [
-          Icon(Icons.call_rounded, color: AppColors.accent, size: 20),
-          SizedBox(width: 8),
-          Text('Incoming Call', style: TextStyle(fontWeight: FontWeight.bold)),
-        ]),
-        content: Row(children: [
-          CircleAvatar(
-            backgroundColor: caller.roleColor.withOpacity(0.15),
-            child: Text(caller.initials,
+        title: const Row(
+          children: [
+            Icon(Icons.call_rounded, color: AppColors.accent, size: 20),
+            SizedBox(width: 8),
+            Text(
+              'Incoming Call',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        content: Row(
+          children: [
+            CircleAvatar(
+              backgroundColor: caller.roleColor.withOpacity(0.15),
+              child: Text(
+                caller.initials,
                 style: TextStyle(
-                    color: caller.roleColor, fontWeight: FontWeight.bold)),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
+                  color: caller.roleColor,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
               child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                Text(caller.fullName,
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                Text(caller.role,
-                    style:
-                        const TextStyle(color: Colors.black45, fontSize: 12)),
-              ])),
-        ]),
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    caller.fullName,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  Text(
+                    caller.role,
+                    style: const TextStyle(color: Colors.black45, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
         actions: [
           TextButton.icon(
             style: TextButton.styleFrom(foregroundColor: AppColors.errorColor),
             icon: const Icon(Icons.call_end_rounded),
             label: const Text('Decline'),
             onPressed: () async {
-              _dialogShown = false;
+              // FIX 3: Reset active call doc on decline
+              _activeCallDocId = null;
               Navigator.of(ctx, rootNavigator: true).pop();
               await FirebaseFirestore.instance
                   .collection('calls')
@@ -950,18 +1092,20 @@ class _IncomingCallListenerState extends State<IncomingCallListener> {
               backgroundColor: AppColors.accent,
               foregroundColor: AppColors.white,
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
             icon: const Icon(Icons.call_rounded, size: 16),
             label: const Text('Answer'),
             onPressed: () {
-              _dialogShown = false;
+              // FIX 3: Reset active call doc on answer (screen takes over)
+              _activeCallDocId = null;
               Navigator.of(ctx, rootNavigator: true).pop();
-              // FIX: use rootNavigator to push from root — no ancestry issue
               Navigator.of(context, rootNavigator: true).push(
                 MaterialPageRoute(
-                    builder: (_) =>
-                        InAppCallScreen(peer: caller, isOutgoing: false)),
+                  builder: (_) =>
+                      InAppCallScreen(peer: caller, isOutgoing: false),
+                ),
               );
             },
           ),
@@ -1016,12 +1160,18 @@ class _InAppChatScreenState extends State<InAppChatScreen> {
     setState(() => _sending = true);
     _ctrl.clear();
     await ChatService.sendMessage(
-        myUid: _myUid, otherUid: widget.peer.uid, text: text);
+      myUid: _myUid,
+      otherUid: widget.peer.uid,
+      text: text,
+    );
     if (mounted) setState(() => _sending = false);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
-        _scroll.animateTo(_scroll.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
       }
     });
   }
@@ -1034,218 +1184,283 @@ class _InAppChatScreenState extends State<InAppChatScreen> {
         backgroundColor: AppColors.primary,
         elevation: 0,
         leading: const BackButton(color: AppColors.white),
-        title: Row(children: [
-          CircleAvatar(
-            radius: 18,
-            backgroundColor: widget.peer.roleColor.withOpacity(0.3),
-            child: Text(widget.peer.initials,
+        title: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: widget.peer.roleColor.withOpacity(0.3),
+              child: Text(
+                widget.peer.initials,
                 style: const TextStyle(
-                    color: AppColors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13)),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
+                  color: AppColors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
               child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                Text(widget.peer.fullName,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    widget.peer.fullName,
                     style: const TextStyle(
-                        color: AppColors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold)),
-                Text(
-                  widget.peer.isOnline ? 'Online' : 'Offline',
-                  style: TextStyle(
+                      color: AppColors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Text(
+                    widget.peer.isOnline ? 'Online' : 'Offline',
+                    style: TextStyle(
                       color: widget.peer.isOnline
                           ? AppColors.accent
                           : Colors.white54,
-                      fontSize: 11),
-                ),
-              ])),
-        ]),
+                      fontSize: 11,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.call_rounded, color: AppColors.white),
             tooltip: 'In-app call',
             onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) =>
-                        InAppCallScreen(peer: widget.peer, isOutgoing: true))),
+              context,
+              MaterialPageRoute(
+                builder: (_) =>
+                    InAppCallScreen(peer: widget.peer, isOutgoing: true),
+              ),
+            ),
           ),
         ],
       ),
-      body: Column(children: [
-        Expanded(
-          child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-            stream: ChatService.messageStream(_myUid, widget.peer.uid),
-            builder: (context, snap) {
-              if (!snap.hasData) {
-                return const Center(
-                    child: CircularProgressIndicator(color: AppColors.primary));
-              }
-              final docs = snap.data!.docs;
-              if (docs.isEmpty) {
-                return Center(
-                    child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  const Icon(Icons.chat_bubble_outline_rounded,
-                      size: 56, color: Colors.black12),
-                  const SizedBox(height: 12),
-                  const Text('No messages yet',
-                      style: TextStyle(color: Colors.black38, fontSize: 14)),
-                  const SizedBox(height: 4),
-                  Text('Say hi to ${widget.peer.firstName}!',
-                      style:
-                          const TextStyle(color: Colors.black26, fontSize: 12)),
-                ]));
-              }
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (_scroll.hasClients) {
-                  _scroll.animateTo(_scroll.position.maxScrollExtent,
-                      duration: const Duration(milliseconds: 200),
-                      curve: Curves.easeOut);
+      body: Column(
+        children: [
+          Expanded(
+            child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+              stream: ChatService.messageStream(_myUid, widget.peer.uid),
+              builder: (context, snap) {
+                if (!snap.hasData) {
+                  return const Center(
+                    child: CircularProgressIndicator(color: AppColors.primary),
+                  );
                 }
-              });
-              return ListView.builder(
-                controller: _scroll,
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                itemCount: docs.length,
-                itemBuilder: (_, i) {
-                  final d = docs[i].data();
-                  final isMe = d['from'] == _myUid;
-                  final ts = d['ts'] != null
-                      ? (d['ts'] as Timestamp).toDate()
-                      : DateTime.now();
-                  return Align(
-                    alignment:
-                        isMe ? Alignment.centerRight : Alignment.centerLeft,
-                    child: Container(
-                      margin: const EdgeInsets.symmetric(vertical: 3),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 9),
-                      constraints: BoxConstraints(
-                          maxWidth: MediaQuery.of(context).size.width * 0.72),
-                      decoration: BoxDecoration(
-                        color: isMe ? AppColors.primary : AppColors.white,
-                        borderRadius: BorderRadius.only(
-                          topLeft: const Radius.circular(16),
-                          topRight: const Radius.circular(16),
-                          bottomLeft: Radius.circular(isMe ? 16 : 4),
-                          bottomRight: Radius.circular(isMe ? 4 : 16),
+                final docs = snap.data!.docs;
+                if (docs.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.chat_bubble_outline_rounded,
+                          size: 56,
+                          color: Colors.black12,
                         ),
-                        boxShadow: [
-                          BoxShadow(
+                        const SizedBox(height: 12),
+                        const Text(
+                          'No messages yet',
+                          style: TextStyle(color: Colors.black38, fontSize: 14),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Say hi to ${widget.peer.firstName}!',
+                          style: const TextStyle(
+                            color: Colors.black26,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (_scroll.hasClients) {
+                    _scroll.animateTo(
+                      _scroll.position.maxScrollExtent,
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOut,
+                    );
+                  }
+                });
+                return ListView.builder(
+                  controller: _scroll,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  itemCount: docs.length,
+                  itemBuilder: (_, i) {
+                    final d = docs[i].data();
+                    final isMe = d['from'] == _myUid;
+                    final ts = d['ts'] != null
+                        ? (d['ts'] as Timestamp).toDate()
+                        : DateTime.now();
+                    return Align(
+                      alignment:
+                          isMe ? Alignment.centerRight : Alignment.centerLeft,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(vertical: 3),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 9,
+                        ),
+                        constraints: BoxConstraints(
+                          maxWidth: MediaQuery.of(context).size.width * 0.72,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isMe ? AppColors.primary : AppColors.white,
+                          borderRadius: BorderRadius.only(
+                            topLeft: const Radius.circular(16),
+                            topRight: const Radius.circular(16),
+                            bottomLeft: Radius.circular(isMe ? 16 : 4),
+                            bottomRight: Radius.circular(isMe ? 4 : 16),
+                          ),
+                          boxShadow: [
+                            BoxShadow(
                               color: Colors.black.withOpacity(0.06),
                               blurRadius: 4,
-                              offset: const Offset(0, 2))
-                        ],
-                      ),
-                      child: Column(
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Text(d['text'] ?? '',
-                                style: TextStyle(
-                                    color:
-                                        isMe ? AppColors.white : Colors.black87,
-                                    fontSize: 14)),
+                            Text(
+                              d['text'] ?? '',
+                              style: TextStyle(
+                                color: isMe ? AppColors.white : Colors.black87,
+                                fontSize: 14,
+                              ),
+                            ),
                             const SizedBox(height: 3),
                             Text(
                               '${ts.hour.toString().padLeft(2, '0')}:'
                               '${ts.minute.toString().padLeft(2, '0')}',
                               style: TextStyle(
-                                  fontSize: 10,
-                                  color:
-                                      isMe ? Colors.white54 : Colors.black38),
+                                fontSize: 10,
+                                color: isMe ? Colors.white54 : Colors.black38,
+                              ),
                             ),
-                          ]),
-                    ),
-                  );
-                },
-              );
-            },
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
           ),
-        ),
-        Container(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-          decoration: BoxDecoration(
-            color: AppColors.white,
-            boxShadow: [
-              BoxShadow(
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            decoration: BoxDecoration(
+              color: AppColors.white,
+              boxShadow: [
+                BoxShadow(
                   color: Colors.black.withOpacity(0.06),
                   blurRadius: 8,
-                  offset: const Offset(0, -2))
-            ],
-          ),
-          child: SafeArea(
-            top: false,
-            child: Row(children: [
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: AppColors.background,
-                    borderRadius: BorderRadius.circular(24),
-                    border: Border.all(color: Colors.black.withOpacity(0.08)),
-                  ),
-                  child: TextField(
-                    controller: _ctrl,
-                    maxLines: 4,
-                    minLines: 1,
-                    textCapitalization: TextCapitalization.sentences,
-                    style: const TextStyle(fontSize: 14, color: Colors.black87),
-                    decoration: const InputDecoration(
-                      hintText: 'Type a message…',
-                      hintStyle: TextStyle(fontSize: 14, color: Colors.black38),
-                      border: InputBorder.none,
-                      contentPadding:
-                          EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  offset: const Offset(0, -2),
+                ),
+              ],
+            ),
+            child: SafeArea(
+              top: false,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: AppColors.background,
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(
+                          color: Colors.black.withOpacity(0.08),
+                        ),
+                      ),
+                      child: TextField(
+                        controller: _ctrl,
+                        maxLines: 4,
+                        minLines: 1,
+                        textCapitalization: TextCapitalization.sentences,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          color: Colors.black87,
+                        ),
+                        decoration: const InputDecoration(
+                          hintText: 'Type a message…',
+                          hintStyle: TextStyle(
+                            fontSize: 14,
+                            color: Colors.black38,
+                          ),
+                          border: InputBorder.none,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 10,
+                          ),
+                        ),
+                        onSubmitted: (_) => _send(),
+                      ),
                     ),
-                    onSubmitted: (_) => _send(),
                   ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: _sending ? null : _send,
-                child: Container(
-                  width: 44,
-                  height: 44,
-                  decoration: BoxDecoration(
-                    color: AppColors.primary,
-                    shape: BoxShape.circle,
-                    boxShadow: [
-                      BoxShadow(
-                          color: AppColors.primary.withOpacity(0.3),
-                          blurRadius: 8,
-                          offset: const Offset(0, 2))
-                    ],
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: _sending ? null : _send,
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: AppColors.primary,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppColors.primary.withOpacity(0.3),
+                            blurRadius: 8,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: _sending
+                          ? const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: CircularProgressIndicator(
+                                color: AppColors.white,
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : const Icon(
+                              Icons.send_rounded,
+                              color: AppColors.white,
+                              size: 20,
+                            ),
+                    ),
                   ),
-                  child: _sending
-                      ? const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: CircularProgressIndicator(
-                              color: AppColors.white, strokeWidth: 2))
-                      : const Icon(Icons.send_rounded,
-                          color: AppColors.white, size: 20),
-                ),
+                ],
               ),
-            ]),
+            ),
           ),
-        ),
-      ]),
+        ],
+      ),
     );
   }
 }
 
 // ─────────────────────────────────────────
 //  IN-APP CALL SCREEN
+//  FIX 5: Permission errors from _getLocalAudio are caught and shown
+//  to the user with a snackbar before popping the screen.
 // ─────────────────────────────────────────
 class InAppCallScreen extends StatefulWidget {
   final CampusPerson peer;
   final bool isOutgoing;
-  const InAppCallScreen(
-      {super.key, required this.peer, required this.isOutgoing});
+  const InAppCallScreen({
+    super.key,
+    required this.peer,
+    required this.isOutgoing,
+  });
   @override
   State<InAppCallScreen> createState() => _InAppCallScreenState();
 }
@@ -1290,10 +1505,19 @@ class _InAppCallScreenState extends State<InAppCallScreen> {
       });
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Call error: $e'),
-          backgroundColor: AppColors.errorColor,
-        ));
+        // FIX 5: Show permission error clearly before popping
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString()),
+            backgroundColor: AppColors.errorColor,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            margin: const EdgeInsets.all(16),
+            duration: const Duration(seconds: 5),
+          ),
+        );
         Navigator.pop(context);
       }
     }
@@ -1339,52 +1563,74 @@ class _InAppCallScreenState extends State<InAppCallScreen> {
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             const SizedBox(height: 20),
-            Column(children: [
-              CircleAvatar(
-                radius: 56,
-                backgroundColor: Colors.white.withOpacity(0.15),
-                child: Text(widget.peer.initials,
+            Column(
+              children: [
+                CircleAvatar(
+                  radius: 56,
+                  backgroundColor: Colors.white.withOpacity(0.15),
+                  child: Text(
+                    widget.peer.initials,
                     style: const TextStyle(
-                        color: AppColors.white,
-                        fontSize: 40,
-                        fontWeight: FontWeight.bold)),
-              ),
-              const SizedBox(height: 22),
-              Text(widget.peer.fullName,
-                  style: const TextStyle(
                       color: AppColors.white,
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Text(
-                _connected
-                    ? _timeLabel
-                    : widget.isOutgoing
-                        ? 'Calling…'
-                        : 'Connecting…',
-                style: const TextStyle(color: Colors.white60, fontSize: 16),
-              ),
-              if (_connected) ...[
-                const SizedBox(height: 14),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: AppColors.accent.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(20),
-                    border:
-                        Border.all(color: AppColors.accent.withOpacity(0.4)),
+                      fontSize: 40,
+                      fontWeight: FontWeight.bold,
+                    ),
                   ),
-                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.lock_rounded, color: AppColors.accent, size: 13),
-                    SizedBox(width: 6),
-                    Text('In-app call · end-to-end',
-                        style:
-                            TextStyle(color: AppColors.accent, fontSize: 12)),
-                  ]),
                 ),
+                const SizedBox(height: 22),
+                Text(
+                  widget.peer.fullName,
+                  style: const TextStyle(
+                    color: AppColors.white,
+                    fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _connected
+                      ? _timeLabel
+                      : widget.isOutgoing
+                          ? 'Calling…'
+                          : 'Connecting…',
+                  style: const TextStyle(color: Colors.white60, fontSize: 16),
+                ),
+                if (_connected) ...[
+                  const SizedBox(height: 14),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: AppColors.accent.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: AppColors.accent.withOpacity(0.4),
+                      ),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.lock_rounded,
+                          color: AppColors.accent,
+                          size: 13,
+                        ),
+                        SizedBox(width: 6),
+                        Text(
+                          'In-app call · end-to-end',
+                          style: TextStyle(
+                            color: AppColors.accent,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ],
-            ]),
+            ),
             Padding(
               padding: const EdgeInsets.only(bottom: 50),
               child: Row(
@@ -1431,17 +1677,21 @@ class _InAppCallScreenState extends State<InAppCallScreen> {
   }) {
     return GestureDetector(
       onTap: onTap,
-      child: Column(children: [
-        Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          child: Icon(icon, color: iconColor, size: size * 0.42),
-        ),
-        const SizedBox(height: 8),
-        Text(label,
-            style: const TextStyle(color: Colors.white70, fontSize: 12)),
-      ]),
+      child: Column(
+        children: [
+          Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            child: Icon(icon, color: iconColor, size: size * 0.42),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -1489,7 +1739,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       _phoneCtrl,
       _rollCtrl,
       _parentCtrl,
-      _empCtrl
+      _empCtrl,
     ]) {
       c.dispose();
     }
@@ -1529,30 +1779,42 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           .doc(uid)
           .update(updates);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: const Row(children: [
-            Icon(Icons.check_circle_rounded, color: AppColors.white, size: 18),
-            SizedBox(width: 8),
-            Text('Profile updated!'),
-          ]),
-          backgroundColor: AppColors.accent,
-          behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          margin: const EdgeInsets.all(16),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Row(
+              children: [
+                Icon(
+                  Icons.check_circle_rounded,
+                  color: AppColors.white,
+                  size: 18,
+                ),
+                SizedBox(width: 8),
+                Text('Profile updated!'),
+              ],
+            ),
+            backgroundColor: AppColors.accent,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            margin: const EdgeInsets.all(16),
+          ),
+        );
         Navigator.pop(context, true);
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Failed: $e'),
-          backgroundColor: AppColors.errorColor,
-          behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          margin: const EdgeInsets.all(16),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed: $e'),
+            backgroundColor: AppColors.errorColor,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            margin: const EdgeInsets.all(16),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _saving = false);
@@ -1567,11 +1829,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         backgroundColor: _accent,
         elevation: 0,
         leading: const BackButton(color: AppColors.white),
-        title: const Text('Edit Profile',
-            style: TextStyle(
-                color: AppColors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 18)),
+        title: const Text(
+          'Edit Profile',
+          style: TextStyle(
+            color: AppColors.white,
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
+          ),
+        ),
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 12),
@@ -1582,12 +1847,18 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
-                          color: AppColors.white, strokeWidth: 2))
-                  : const Text('Save',
+                        color: AppColors.white,
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : const Text(
+                      'Save',
                       style: TextStyle(
-                          color: AppColors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16)),
+                        color: AppColors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
             ),
           ),
         ],
@@ -1596,160 +1867,188 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         padding: const EdgeInsets.all(20),
         child: Form(
           key: _formKey,
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Center(
-              child: CircleAvatar(
-                radius: 46,
-                backgroundColor: _accent.withOpacity(0.15),
-                child: Text(
-                  '${_firstCtrl.text.isNotEmpty ? _firstCtrl.text[0].toUpperCase() : '?'}'
-                  '${_lastCtrl.text.isNotEmpty ? _lastCtrl.text[0].toUpperCase() : ''}',
-                  style: TextStyle(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: CircleAvatar(
+                  radius: 46,
+                  backgroundColor: _accent.withOpacity(0.15),
+                  child: Text(
+                    '${_firstCtrl.text.isNotEmpty ? _firstCtrl.text[0].toUpperCase() : '?'}'
+                    '${_lastCtrl.text.isNotEmpty ? _lastCtrl.text[0].toUpperCase() : ''}',
+                    style: TextStyle(
                       color: _accent,
                       fontSize: 34,
-                      fontWeight: FontWeight.bold),
-                ),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Center(
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                decoration: BoxDecoration(
-                  color: _accent.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(_role,
-                    style: TextStyle(
-                        color: _accent,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13)),
-              ),
-            ),
-            const SizedBox(height: 28),
-            _sectionHeader('Personal Info'),
-            const SizedBox(height: 14),
-            Card(
-              elevation: 2,
-              shadowColor: Colors.black12,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(18)),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(children: [
-                  _editField(
-                    ctrl: _firstCtrl,
-                    label: 'First Name',
-                    icon: Icons.person_outline,
-                    validator: (v) =>
-                        (v == null || v.isEmpty) ? 'Required' : null,
-                    onChanged: (_) => setState(() {}),
-                  ),
-                  const Divider(height: 20),
-                  _editField(
-                    ctrl: _lastCtrl,
-                    label: 'Last Name',
-                    icon: Icons.person_outline,
-                    validator: (v) =>
-                        (v == null || v.isEmpty) ? 'Required' : null,
-                    onChanged: (_) => setState(() {}),
-                  ),
-                  const Divider(height: 20),
-                  _editField(
-                    ctrl: _phoneCtrl,
-                    label: 'Phone Number (optional)',
-                    icon: Icons.phone_outlined,
-                    type: TextInputType.phone,
-                  ),
-                ]),
-              ),
-            ),
-            if (_role == 'Student') ...[
-              const SizedBox(height: 20),
-              _sectionHeader('Student Info'),
-              const SizedBox(height: 14),
-              Card(
-                elevation: 2,
-                shadowColor: Colors.black12,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(18)),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(children: [
-                    _editField(
-                      ctrl: _rollCtrl,
-                      label: 'Roll Number',
-                      icon: Icons.badge_outlined,
+                      fontWeight: FontWeight.bold,
                     ),
-                    const Divider(height: 20),
-                    _editField(
-                      ctrl: _parentCtrl,
-                      label: 'Parent Email',
-                      icon: Icons.family_restroom_outlined,
-                      type: TextInputType.emailAddress,
-                    ),
-                  ]),
-                ),
-              ),
-            ],
-            if (_role == 'Faculty') ...[
-              const SizedBox(height: 20),
-              _sectionHeader('Faculty Info'),
-              const SizedBox(height: 14),
-              Card(
-                elevation: 2,
-                shadowColor: Colors.black12,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(18)),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: _editField(
-                    ctrl: _empCtrl,
-                    label: 'Employee ID',
-                    icon: Icons.work_outline,
                   ),
                 ),
               ),
-            ],
-            const SizedBox(height: 20),
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.amber.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.amber.withOpacity(0.3)),
-              ),
-              child: const Row(children: [
-                Icon(Icons.info_outline_rounded, color: Colors.amber, size: 18),
-                SizedBox(width: 10),
-                Expanded(
+              const SizedBox(height: 8),
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _accent.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
                   child: Text(
-                    'Email and role cannot be changed. '
-                    'Contact admin if needed.',
-                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                    _role,
+                    style: TextStyle(
+                      color: _accent,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    ),
                   ),
                 ),
-              ]),
-            ),
-            const SizedBox(height: 30),
-          ]),
+              ),
+              const SizedBox(height: 28),
+              _sectionHeader('Personal Info'),
+              const SizedBox(height: 14),
+              Card(
+                elevation: 2,
+                shadowColor: Colors.black12,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    children: [
+                      _editField(
+                        ctrl: _firstCtrl,
+                        label: 'First Name',
+                        icon: Icons.person_outline,
+                        validator: (v) =>
+                            (v == null || v.isEmpty) ? 'Required' : null,
+                        onChanged: (_) => setState(() {}),
+                      ),
+                      const Divider(height: 20),
+                      _editField(
+                        ctrl: _lastCtrl,
+                        label: 'Last Name',
+                        icon: Icons.person_outline,
+                        validator: (v) =>
+                            (v == null || v.isEmpty) ? 'Required' : null,
+                        onChanged: (_) => setState(() {}),
+                      ),
+                      const Divider(height: 20),
+                      _editField(
+                        ctrl: _phoneCtrl,
+                        label: 'Phone Number (optional)',
+                        icon: Icons.phone_outlined,
+                        type: TextInputType.phone,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (_role == 'Student') ...[
+                const SizedBox(height: 20),
+                _sectionHeader('Student Info'),
+                const SizedBox(height: 14),
+                Card(
+                  elevation: 2,
+                  shadowColor: Colors.black12,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      children: [
+                        _editField(
+                          ctrl: _rollCtrl,
+                          label: 'Roll Number',
+                          icon: Icons.badge_outlined,
+                        ),
+                        const Divider(height: 20),
+                        _editField(
+                          ctrl: _parentCtrl,
+                          label: 'Parent Email',
+                          icon: Icons.family_restroom_outlined,
+                          type: TextInputType.emailAddress,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              if (_role == 'Faculty') ...[
+                const SizedBox(height: 20),
+                _sectionHeader('Faculty Info'),
+                const SizedBox(height: 14),
+                Card(
+                  elevation: 2,
+                  shadowColor: Colors.black12,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: _editField(
+                      ctrl: _empCtrl,
+                      label: 'Employee ID',
+                      icon: Icons.work_outline,
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.amber.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.amber.withOpacity(0.3)),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline_rounded,
+                      color: Colors.amber,
+                      size: 18,
+                    ),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Email and role cannot be changed. '
+                        'Contact admin if needed.',
+                        style: TextStyle(fontSize: 12, color: Colors.black54),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 30),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _sectionHeader(String title) => Row(children: [
-        Container(
+  Widget _sectionHeader(String title) => Row(
+        children: [
+          Container(
             width: 4,
             height: 22,
             decoration: BoxDecoration(
-                color: _accent, borderRadius: BorderRadius.circular(4))),
-        const SizedBox(width: 8),
-        Text(title,
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-      ]);
+              color: _accent,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+        ],
+      );
 
   Widget _editField({
     required TextEditingController ctrl,
@@ -1773,13 +2072,17 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         fillColor: Colors.white,
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
         enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
+        ),
         focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(color: _accent, width: 2)),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: _accent, width: 2),
+        ),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 16,
+          vertical: 14,
+        ),
       ),
     );
   }
@@ -1854,15 +2157,20 @@ class SplashScreen extends StatelessWidget {
           children: [
             Icon(Icons.school_rounded, size: 90, color: AppColors.white),
             SizedBox(height: 20),
-            Text('Campus Locator',
-                style: TextStyle(
-                    color: AppColors.white,
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1)),
+            Text(
+              'Campus Locator',
+              style: TextStyle(
+                color: AppColors.white,
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1,
+              ),
+            ),
             SizedBox(height: 10),
-            Text('University Portal',
-                style: TextStyle(color: Colors.white60, fontSize: 15)),
+            Text(
+              'University Portal',
+              style: TextStyle(color: Colors.white60, fontSize: 15),
+            ),
             SizedBox(height: 40),
             CircularProgressIndicator(color: AppColors.white, strokeWidth: 2.5),
           ],
@@ -1873,9 +2181,8 @@ class SplashScreen extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────
-//  HOME SCREEN — FIX: IncomingCallListener
-//  now wraps the entire Scaffold, not just
-//  the FutureBuilder body.
+//  HOME SCREEN
+//  IncomingCallListener wraps the entire Scaffold (original fix).
 // ─────────────────────────────────────────
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -1896,22 +2203,26 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
 
-    // ✅ FIX: IncomingCallListener wraps the whole Scaffold
     return IncomingCallListener(
       child: Scaffold(
         backgroundColor: AppColors.background,
         appBar: AppBar(
           backgroundColor: AppColors.primary,
           elevation: 0,
-          title: const Row(children: [
-            Icon(Icons.school_rounded, color: AppColors.white, size: 22),
-            SizedBox(width: 8),
-            Text('Campus Locator',
+          title: const Row(
+            children: [
+              Icon(Icons.school_rounded, color: AppColors.white, size: 22),
+              SizedBox(width: 8),
+              Text(
+                'Campus Locator',
                 style: TextStyle(
-                    color: AppColors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18)),
-          ]),
+                  color: AppColors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+            ],
+          ),
           actions: [
             IconButton(
               icon: const Icon(Icons.edit_rounded, color: AppColors.white),
@@ -1920,17 +2231,21 @@ class _HomeScreenState extends State<HomeScreen> {
                 final data = await _getUserData();
                 if (data == null || !mounted) return;
                 final refreshed = await Navigator.push<bool>(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => ProfileEditScreen(currentData: data)));
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ProfileEditScreen(currentData: data),
+                  ),
+                );
                 if (refreshed == true && mounted) setState(() {});
               },
             ),
             IconButton(
               icon: const Icon(Icons.people_rounded, color: AppColors.white),
               tooltip: 'People',
-              onPressed: () => Navigator.push(context,
-                  MaterialPageRoute(builder: (_) => const PeopleScreen())),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const PeopleScreen()),
+              ),
             ),
             IconButton(
               icon: const Icon(Icons.logout_rounded, color: AppColors.white),
@@ -1949,7 +2264,8 @@ class _HomeScreenState extends State<HomeScreen> {
           builder: (context, snapshot) {
             if (snapshot.connectionState == ConnectionState.waiting) {
               return const Center(
-                  child: CircularProgressIndicator(color: AppColors.primary));
+                child: CircularProgressIndicator(color: AppColors.primary),
+              );
             }
             final data = snapshot.data;
             final role = data?['role'] ?? 'User';
@@ -1972,144 +2288,218 @@ class _HomeScreenState extends State<HomeScreen> {
             return SingleChildScrollView(
               padding: const EdgeInsets.all(20),
               child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Welcome banner
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [roleColor, roleColor.withOpacity(0.7)],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                              color: roleColor.withOpacity(0.3),
-                              blurRadius: 15,
-                              offset: const Offset(0, 6))
-                        ],
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [roleColor, roleColor.withOpacity(0.7)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
                       ),
-                      child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Icon(roleIcon,
-                                  size: 36, color: AppColors.white),
-                            ),
-                            const SizedBox(height: 14),
-                            Text('Welcome back,',
-                                style: TextStyle(
-                                    color: Colors.white.withOpacity(0.8),
-                                    fontSize: 14)),
-                            const SizedBox(height: 2),
-                            Text(displayName,
-                                style: const TextStyle(
-                                    color: AppColors.white,
-                                    fontSize: 24,
-                                    fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 10),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 14, vertical: 5),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                    color: Colors.white.withOpacity(0.3)),
-                              ),
-                              child: Text(role,
-                                  style: const TextStyle(
-                                      color: AppColors.white,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w500)),
-                            ),
-                          ]),
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: roleColor.withOpacity(0.3),
+                          blurRadius: 15,
+                          offset: const Offset(0, 6),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 24),
-                    const _LiveLocationCard(),
-                    const SizedBox(height: 24),
-
-                    if (data != null) ...[
-                      _sectionHeader('Profile Details', roleColor),
-                      const SizedBox(height: 14),
-                      Card(
-                        elevation: 3,
-                        shadowColor: Colors.black12,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(18)),
-                        child: Padding(
-                          padding: const EdgeInsets.all(16),
-                          child: Column(children: [
-                            _profileTile(Icons.person_rounded, 'Full Name',
-                                displayName, roleColor),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(
+                            roleIcon,
+                            size: 36,
+                            color: AppColors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          'Welcome back,',
+                          style: TextStyle(
+                            color: Colors.white.withOpacity(0.8),
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          displayName,
+                          style: const TextStyle(
+                            color: AppColors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 14,
+                            vertical: 5,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.3),
+                            ),
+                          ),
+                          child: Text(
+                            role,
+                            style: const TextStyle(
+                              color: AppColors.white,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  const _LiveLocationCard(),
+                  const SizedBox(height: 24),
+                  if (data != null) ...[
+                    _sectionHeader('Profile Details', roleColor),
+                    const SizedBox(height: 14),
+                    Card(
+                      elevation: 3,
+                      shadowColor: Colors.black12,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(18),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          children: [
+                            _profileTile(
+                              Icons.person_rounded,
+                              'Full Name',
+                              displayName,
+                              roleColor,
+                            ),
                             _divider(),
-                            _profileTile(Icons.email_rounded, 'Email',
-                                user?.email ?? '-', roleColor),
+                            _profileTile(
+                              Icons.email_rounded,
+                              'Email',
+                              user?.email ?? '-',
+                              roleColor,
+                            ),
                             if (data['phone'] != null) ...[
                               _divider(),
-                              _profileTile(Icons.phone_rounded, 'Phone',
-                                  data['phone'], roleColor),
+                              _profileTile(
+                                Icons.phone_rounded,
+                                'Phone',
+                                data['phone'],
+                                roleColor,
+                              ),
                             ],
                             if (role == 'Student') ...[
                               _divider(),
-                              _profileTile(Icons.badge_rounded, 'Roll Number',
-                                  data['rollNumber'] ?? '-', roleColor),
+                              _profileTile(
+                                Icons.badge_rounded,
+                                'Roll Number',
+                                data['rollNumber'] ?? '-',
+                                roleColor,
+                              ),
                               _divider(),
                               _profileTile(
-                                  Icons.family_restroom_rounded,
-                                  'Parent Email',
-                                  data['parentEmail'] ?? '-',
-                                  roleColor),
+                                Icons.family_restroom_rounded,
+                                'Parent Email',
+                                data['parentEmail'] ?? '-',
+                                roleColor,
+                              ),
                             ],
                             if (role == 'Faculty') ...[
                               _divider(),
-                              _profileTile(Icons.work_rounded, 'Employee ID',
-                                  data['employeeId'] ?? '-', roleColor),
+                              _profileTile(
+                                Icons.work_rounded,
+                                'Employee ID',
+                                data['employeeId'] ?? '-',
+                                roleColor,
+                              ),
                             ],
                             _divider(),
-                            _profileTile(Icons.verified_user_rounded, 'Role',
-                                role, roleColor),
-                          ]),
+                            _profileTile(
+                              Icons.verified_user_rounded,
+                              'Role',
+                              role,
+                              roleColor,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 24),
+                  _sectionHeader('Quick Actions', roleColor),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _actionCard(
+                          Icons.map_rounded,
+                          'Campus Map',
+                          'Find locations',
+                          roleColor,
+                          () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => const PeopleScreen(),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _actionCard(
+                          Icons.schedule_rounded,
+                          'Schedule',
+                          'View timetable',
+                          roleColor,
+                          null,
                         ),
                       ),
                     ],
-                    const SizedBox(height: 24),
-                    _sectionHeader('Quick Actions', roleColor),
-                    const SizedBox(height: 14),
-                    Row(children: [
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
                       Expanded(
-                          child: _actionCard(Icons.map_rounded, 'Campus Map',
-                              'Find locations', roleColor, () {
-                        Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                                builder: (_) => const PeopleScreen()));
-                      })),
+                        child: _actionCard(
+                          Icons.notifications_rounded,
+                          'Notices',
+                          'Announcements',
+                          roleColor,
+                          null,
+                        ),
+                      ),
                       const SizedBox(width: 12),
                       Expanded(
-                          child: _actionCard(Icons.schedule_rounded, 'Schedule',
-                              'View timetable', roleColor, null)),
-                    ]),
-                    const SizedBox(height: 12),
-                    Row(children: [
-                      Expanded(
-                          child: _actionCard(Icons.notifications_rounded,
-                              'Notices', 'Announcements', roleColor, null)),
-                      const SizedBox(width: 12),
-                      Expanded(
-                          child: _actionCard(Icons.contact_support_rounded,
-                              'Support', 'Get help', roleColor, null)),
-                    ]),
-                    const SizedBox(height: 20),
-                  ]),
+                        child: _actionCard(
+                          Icons.contact_support_rounded,
+                          'Support',
+                          'Get help',
+                          roleColor,
+                          null,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                ],
+              ),
             );
           },
         ),
@@ -2117,50 +2507,75 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _sectionHeader(String title, Color color) => Row(children: [
-        Container(
+  Widget _sectionHeader(String title, Color color) => Row(
+        children: [
+          Container(
             width: 4,
             height: 22,
             decoration: BoxDecoration(
-                color: color, borderRadius: BorderRadius.circular(4))),
-        const SizedBox(width: 8),
-        Text(title,
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-      ]);
+              color: color,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            title,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+        ],
+      );
 
   Widget _divider() => const Divider(height: 1, color: Color(0xFFEEEEEE));
 
   Widget _profileTile(IconData icon, String label, String value, Color color) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),
-      child: Row(children: [
-        Container(
-          padding: const EdgeInsets.all(9),
-          decoration: BoxDecoration(
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(9),
+            decoration: BoxDecoration(
               color: color.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(10)),
-          child: Icon(icon, color: color, size: 20),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label,
-              style: const TextStyle(
-                  fontSize: 11,
-                  color: Colors.black45,
-                  fontWeight: FontWeight.w500)),
-          const SizedBox(height: 2),
-          Text(value,
-              style:
-                  const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-        ])),
-      ]),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, color: color, size: 20),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Colors.black45,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _actionCard(IconData icon, String title, String subtitle, Color color,
-      VoidCallback? onTap) {
+  Widget _actionCard(
+    IconData icon,
+    String title,
+    String subtitle,
+    Color color,
+    VoidCallback? onTap,
+  ) {
     return GestureDetector(
       onTap: onTap,
       child: Card(
@@ -2169,23 +2584,32 @@ class _HomeScreenState extends State<HomeScreen> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         child: Padding(
           padding: const EdgeInsets.all(16),
-          child:
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
                   color: color.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12)),
-              child: Icon(icon, color: color, size: 24),
-            ),
-            const SizedBox(height: 12),
-            Text(title,
-                style:
-                    const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 2),
-            Text(subtitle,
-                style: const TextStyle(fontSize: 12, color: Colors.black45)),
-          ]),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, color: color, size: 24),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: const TextStyle(fontSize: 12, color: Colors.black45),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2211,11 +2635,16 @@ class _LiveLocationCardState extends State<_LiveLocationCard> {
     super.initState();
     _sub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high, distanceFilter: 20),
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 20,
+      ),
     ).listen((p) async {
       if (!mounted) return;
       setState(() => _pos = p);
-      final name = await GeocodingHelper.getPlaceName(p.latitude, p.longitude);
+      final name = await GeocodingHelper.getPlaceName(
+        p.latitude,
+        p.longitude,
+      );
       if (mounted) setState(() => _placeName = name);
     });
   }
@@ -2235,64 +2664,78 @@ class _LiveLocationCardState extends State<_LiveLocationCard> {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: AppColors.accent.withOpacity(0.3)),
       ),
-      child: Row(children: [
-        Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
               color: AppColors.accent.withOpacity(0.15),
-              shape: BoxShape.circle),
-          child: const Icon(Icons.my_location_rounded,
-              color: AppColors.accent, size: 22),
-        ),
-        const SizedBox(width: 14),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Live Location Active',
-              style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 14,
-                  color: AppColors.accent)),
-          const SizedBox(height: 2),
-          Text(
-            _pos != null ? _placeName : 'Waiting for GPS signal...',
-            style: const TextStyle(
-                fontSize: 12,
-                color: Colors.black87,
-                fontWeight: FontWeight.w500),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          if (_pos != null)
-            Text(
-              '${_pos!.latitude.toStringAsFixed(5)}, '
-              '${_pos!.longitude.toStringAsFixed(5)}  '
-              '±${_pos!.accuracy.toStringAsFixed(0)}m',
-              style: const TextStyle(fontSize: 10, color: Colors.black45),
+              shape: BoxShape.circle,
             ),
-        ])),
-        Container(
-          width: 10,
-          height: 10,
-          decoration: BoxDecoration(
-            color: _pos != null ? AppColors.accent : Colors.orange,
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
+            child: const Icon(
+              Icons.my_location_rounded,
+              color: AppColors.accent,
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Live Location Active',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                    color: AppColors.accent,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _pos != null ? _placeName : 'Waiting for GPS signal...',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Colors.black87,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (_pos != null)
+                  Text(
+                    '${_pos!.latitude.toStringAsFixed(5)}, '
+                    '${_pos!.longitude.toStringAsFixed(5)}  '
+                    '±${_pos!.accuracy.toStringAsFixed(0)}m',
+                    style: const TextStyle(fontSize: 10, color: Colors.black45),
+                  ),
+              ],
+            ),
+          ),
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              color: _pos != null ? AppColors.accent : Colors.orange,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
                   color: (_pos != null ? AppColors.accent : Colors.orange)
                       .withOpacity(0.4),
-                  blurRadius: 6)
-            ],
+                  blurRadius: 6,
+                ),
+              ],
+            ),
           ),
-        ),
-      ]),
+        ],
+      ),
     );
   }
 }
 
 // ─────────────────────────────────────────
-//  AUTH SCREEN — FIX 3: capture context
-//  before async gap in _forgotPassword
+//  AUTH SCREEN
+//  forgotPassword context captured before async gap (original fix).
 // ─────────────────────────────────────────
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -2366,19 +2809,26 @@ class _AuthScreenState extends State<AuthScreen> {
 
   void _snack(String msg, {bool error = false}) {
     ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Row(children: [
-        Icon(error ? Icons.error_rounded : Icons.check_circle_rounded,
-            color: AppColors.white, size: 18),
-        const SizedBox(width: 8),
-        Expanded(child: Text(msg)),
-      ]),
-      backgroundColor: error ? AppColors.errorColor : AppColors.accent,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      margin: const EdgeInsets.all(16),
-      duration: const Duration(seconds: 4),
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Icon(
+              error ? Icons.error_rounded : Icons.check_circle_rounded,
+              color: AppColors.white,
+              size: 18,
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: Text(msg)),
+          ],
+        ),
+        backgroundColor: error ? AppColors.errorColor : AppColors.accent,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.all(16),
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   String _generateOtp() => (100000 + Random().nextInt(900000)).toString();
@@ -2407,9 +2857,9 @@ class _AuthScreenState extends State<AuthScreen> {
               'origin': 'http://localhost',
             },
             body: jsonEncode({
-              'service_id': EmailJSConfig.serviceId,
-              'template_id': EmailJSConfig.templateId,
-              'user_id': EmailJSConfig.publicKey,
+              'service_id': EmailJSConfig.serviceId, // FIX 2: from .env
+              'template_id': EmailJSConfig.templateId, // FIX 2: from .env
+              'user_id': EmailJSConfig.publicKey, // FIX 2: from .env
               'template_params': {
                 'to_email': email,
                 'otp_code': otp,
@@ -2562,7 +3012,6 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
-  // ✅ FIX 3: capture scaffoldMessengerContext before the async showDialog gap
   Future<void> _forgotPassword() async {
     final scaffoldCtx = context; // capture before async gap
     final emailCtrl = TextEditingController(text: _loginEmailCtrl.text.trim());
@@ -2572,102 +3021,131 @@ class _AuthScreenState extends State<AuthScreen> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setDialogState) => AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: Row(children: [
-            Icon(Icons.lock_reset_rounded, color: _accent, size: 22),
-            const SizedBox(width: 8),
-            const Text('Reset Password',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-          ]),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Text(
-              'Enter your registered email. We\'ll send a reset link.',
-              style: TextStyle(fontSize: 13, color: Colors.black54),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: emailCtrl,
-              keyboardType: TextInputType.emailAddress,
-              autofocus: true,
-              decoration: InputDecoration(
-                labelText: 'Email Address',
-                labelStyle:
-                    TextStyle(color: _accent.withOpacity(0.8), fontSize: 14),
-                prefixIcon:
-                    Icon(Icons.email_outlined, color: _accent, size: 20),
-                filled: true,
-                fillColor: AppColors.background,
-                border:
-                    OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: _accent, width: 2),
-                ),
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
+            children: [
+              Icon(Icons.lock_reset_rounded, color: _accent, size: 22),
+              const SizedBox(width: 8),
+              const Text(
+                'Reset Password',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold),
               ),
-            ),
-          ]),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Enter your registered email. We\'ll send a reset link.',
+                style: TextStyle(fontSize: 13, color: Colors.black54),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: emailCtrl,
+                keyboardType: TextInputType.emailAddress,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: 'Email Address',
+                  labelStyle: TextStyle(
+                    color: _accent.withOpacity(0.8),
+                    fontSize: 14,
+                  ),
+                  prefixIcon: Icon(
+                    Icons.email_outlined,
+                    color: _accent,
+                    size: 20,
+                  ),
+                  filled: true,
+                  fillColor: AppColors.background,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: _accent, width: 2),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                ),
+              ),
+            ],
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child:
-                  const Text('Cancel', style: TextStyle(color: Colors.black45)),
+              child: const Text(
+                'Cancel',
+                style: TextStyle(color: Colors.black45),
+              ),
             ),
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(
                 backgroundColor: _accent,
                 foregroundColor: AppColors.white,
                 shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
               ),
               onPressed: sending
                   ? null
                   : () async {
                       final email = emailCtrl.text.trim();
                       if (email.isEmpty || !email.contains('@')) {
-                        // ✅ use scaffoldCtx (captured before async gap)
-                        ScaffoldMessenger.of(scaffoldCtx).showSnackBar(SnackBar(
-                          content: const Text('Enter a valid email'),
-                          backgroundColor: AppColors.errorColor,
-                          behavior: SnackBarBehavior.floating,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
-                          margin: const EdgeInsets.all(16),
-                        ));
+                        ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                          SnackBar(
+                            content: const Text('Enter a valid email'),
+                            backgroundColor: AppColors.errorColor,
+                            behavior: SnackBarBehavior.floating,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            margin: const EdgeInsets.all(16),
+                          ),
+                        );
                         return;
                       }
                       setDialogState(() => sending = true);
                       try {
-                        await FirebaseAuth.instance
-                            .sendPasswordResetEmail(email: email);
+                        await FirebaseAuth.instance.sendPasswordResetEmail(
+                          email: email,
+                        );
                         if (ctx.mounted) Navigator.pop(ctx);
-                        // ✅ use scaffoldCtx here too
-                        ScaffoldMessenger.of(scaffoldCtx).showSnackBar(SnackBar(
-                          content: Text('Reset email sent to $email ✓'),
-                          backgroundColor: AppColors.accent,
-                          behavior: SnackBarBehavior.floating,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
-                          margin: const EdgeInsets.all(16),
-                        ));
+                        ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                          SnackBar(
+                            content: Text('Reset email sent to $email ✓'),
+                            backgroundColor: AppColors.accent,
+                            behavior: SnackBarBehavior.floating,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            margin: const EdgeInsets.all(16),
+                          ),
+                        );
                       } on FirebaseAuthException catch (e) {
                         setDialogState(() => sending = false);
-                        ScaffoldMessenger.of(scaffoldCtx).showSnackBar(SnackBar(
-                          content: Text(_errMsg(e.code)),
-                          backgroundColor: AppColors.errorColor,
-                          behavior: SnackBarBehavior.floating,
-                          shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
-                          margin: const EdgeInsets.all(16),
-                        ));
+                        ScaffoldMessenger.of(scaffoldCtx).showSnackBar(
+                          SnackBar(
+                            content: Text(_errMsg(e.code)),
+                            backgroundColor: AppColors.errorColor,
+                            behavior: SnackBarBehavior.floating,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            margin: const EdgeInsets.all(16),
+                          ),
+                        );
                       } catch (_) {
                         setDialogState(() => sending = false);
                       }
@@ -2677,7 +3155,10 @@ class _AuthScreenState extends State<AuthScreen> {
                       width: 14,
                       height: 14,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: AppColors.white))
+                        strokeWidth: 2,
+                        color: AppColors.white,
+                      ),
+                    )
                   : const Icon(Icons.send_rounded, size: 16),
               label: Text(sending ? 'Sending…' : 'Send Reset Link'),
             ),
@@ -2716,15 +3197,17 @@ class _AuthScreenState extends State<AuthScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SingleChildScrollView(
-        child: Column(children: [
-          _buildHeader(),
-          const SizedBox(height: 24),
-          _buildRoleSelector(),
-          const SizedBox(height: 20),
-          _buildCard(),
-          _buildFooter(),
-          const SizedBox(height: 30),
-        ]),
+        child: Column(
+          children: [
+            _buildHeader(),
+            const SizedBox(height: 24),
+            _buildRoleSelector(),
+            const SizedBox(height: 20),
+            _buildCard(),
+            _buildFooter(),
+            const SizedBox(height: 30),
+          ],
+        ),
       ),
     );
   }
@@ -2745,9 +3228,10 @@ class _AuthScreenState extends State<AuthScreen> {
         ),
         boxShadow: [
           BoxShadow(
-              color: _accent.withOpacity(0.3),
-              blurRadius: 20,
-              offset: const Offset(0, 8))
+            color: _accent.withOpacity(0.3),
+            blurRadius: 20,
+            offset: const Offset(0, 8),
+          ),
         ],
       ),
       child: SafeArea(
@@ -2763,8 +3247,11 @@ class _AuthScreenState extends State<AuthScreen> {
                   color: Colors.white.withOpacity(0.2),
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: const Icon(Icons.school_rounded,
-                    size: 36, color: AppColors.white),
+                child: const Icon(
+                  Icons.school_rounded,
+                  size: 36,
+                  color: AppColors.white,
+                ),
               ),
               const SizedBox(height: 14),
               AnimatedSwitcher(
@@ -2773,9 +3260,10 @@ class _AuthScreenState extends State<AuthScreen> {
                   _isLogin ? 'Welcome Back!' : 'Create Account',
                   key: ValueKey(_isLogin),
                   style: const TextStyle(
-                      color: AppColors.white,
-                      fontSize: 26,
-                      fontWeight: FontWeight.bold),
+                    color: AppColors.white,
+                    fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
               const SizedBox(height: 4),
@@ -2798,15 +3286,23 @@ class _AuthScreenState extends State<AuthScreen> {
           selectedBackgroundColor: _accent,
           selectedForegroundColor: AppColors.white,
           side: BorderSide(color: _accent),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
         ),
         segments: _roles
-            .map((r) => ButtonSegment(
+            .map(
+              (r) => ButtonSegment(
                 value: r,
-                label: Text(r,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 13))))
+                label: Text(
+                  r,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            )
             .toList(),
         selected: {_role},
         onSelectionChanged: (s) => setState(() => _role = s.first),
@@ -2828,9 +3324,10 @@ class _AuthScreenState extends State<AuthScreen> {
             transitionBuilder: (child, anim) => FadeTransition(
               opacity: anim,
               child: SlideTransition(
-                position: Tween(begin: const Offset(0, 0.05), end: Offset.zero)
-                    .animate(
-                        CurvedAnimation(parent: anim, curve: Curves.easeOut)),
+                position: Tween(
+                  begin: const Offset(0, 0.05),
+                  end: Offset.zero,
+                ).animate(CurvedAnimation(parent: anim, curve: Curves.easeOut)),
                 child: child,
               ),
             ),
@@ -2845,38 +3342,50 @@ class _AuthScreenState extends State<AuthScreen> {
     return Form(
       key: _loginKey,
       child: Column(
-          key: const ValueKey('login'),
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _sectionBar('Sign In'),
-            const SizedBox(height: 20),
-            _field(_loginEmailCtrl, 'Email Address', Icons.email_outlined,
-                type: TextInputType.emailAddress,
-                validator: (v) => (v == null || v.isEmpty)
-                    ? 'Email required'
-                    : !v.contains('@')
-                        ? 'Enter valid email'
-                        : null),
-            const SizedBox(height: 14),
-            _passField(_loginPassCtrl, 'Password', Icons.lock_outline,
-                visible: _loginPassVis,
-                onToggle: () => setState(() => _loginPassVis = !_loginPassVis),
-                validator: (v) =>
-                    (v == null || v.isEmpty) ? 'Password required' : null),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                onPressed: _forgotPassword,
-                child: Text('Forgot password?',
-                    style: TextStyle(
-                        color: _accent,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500)),
+        key: const ValueKey('login'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionBar('Sign In'),
+          const SizedBox(height: 20),
+          _field(
+            _loginEmailCtrl,
+            'Email Address',
+            Icons.email_outlined,
+            type: TextInputType.emailAddress,
+            validator: (v) => (v == null || v.isEmpty)
+                ? 'Email required'
+                : !v.contains('@')
+                    ? 'Enter valid email'
+                    : null,
+          ),
+          const SizedBox(height: 14),
+          _passField(
+            _loginPassCtrl,
+            'Password',
+            Icons.lock_outline,
+            visible: _loginPassVis,
+            onToggle: () => setState(() => _loginPassVis = !_loginPassVis),
+            validator: (v) =>
+                (v == null || v.isEmpty) ? 'Password required' : null,
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: _forgotPassword,
+              child: Text(
+                'Forgot password?',
+                style: TextStyle(
+                  color: _accent,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
-            const SizedBox(height: 4),
-            _btn('LOGIN', _login),
-          ]),
+          ),
+          const SizedBox(height: 4),
+          _btn('LOGIN', _login),
+        ],
+      ),
     );
   }
 
@@ -2884,87 +3393,129 @@ class _AuthScreenState extends State<AuthScreen> {
     return Form(
       key: _registerKey,
       child: Column(
-          key: const ValueKey('register'),
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _sectionBar('Personal Info'),
-            const SizedBox(height: 16),
-            Row(children: [
+        key: const ValueKey('register'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionBar('Personal Info'),
+          const SizedBox(height: 16),
+          Row(
+            children: [
               Expanded(
-                  child: _field(_firstCtrl, 'First Name', Icons.person_outline,
-                      validator: (v) =>
-                          (v == null || v.isEmpty) ? 'Required' : null)),
+                child: _field(
+                  _firstCtrl,
+                  'First Name',
+                  Icons.person_outline,
+                  validator: (v) =>
+                      (v == null || v.isEmpty) ? 'Required' : null,
+                ),
+              ),
               const SizedBox(width: 12),
               Expanded(
-                  child: _field(_lastCtrl, 'Last Name', Icons.person_outline,
-                      validator: (v) =>
-                          (v == null || v.isEmpty) ? 'Required' : null)),
-            ]),
-            const SizedBox(height: 14),
-            _field(_phoneCtrl, 'Phone Number (optional)', Icons.phone_outlined,
-                type: TextInputType.phone),
-            const SizedBox(height: 14),
-            if (_role == 'Student') ...[
-              _field(_rollCtrl, 'Roll Number', Icons.badge_outlined,
+                child: _field(
+                  _lastCtrl,
+                  'Last Name',
+                  Icons.person_outline,
                   validator: (v) =>
-                      (v == null || v.isEmpty) ? 'Required' : null),
-              const SizedBox(height: 14),
-              _field(
-                  _parentCtrl, 'Parent Email', Icons.family_restroom_outlined,
-                  type: TextInputType.emailAddress,
-                  validator: (v) =>
-                      (v == null || v.isEmpty) ? 'Required' : null),
-              const SizedBox(height: 14),
+                      (v == null || v.isEmpty) ? 'Required' : null,
+                ),
+              ),
             ],
-            if (_role == 'Faculty') ...[
-              _field(_empCtrl, 'Employee ID', Icons.work_outline,
-                  validator: (v) =>
-                      (v == null || v.isEmpty) ? 'Required' : null),
-              const SizedBox(height: 14),
-            ],
-            _sectionBar('Account Info'),
-            const SizedBox(height: 16),
-            _field(_regEmailCtrl, 'Email Address', Icons.email_outlined,
-                type: TextInputType.emailAddress,
-                suffix: _otpSending
-                    ? Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                                strokeWidth: 2, color: _accent)))
-                    : TextButton(
-                        onPressed: _countdown > 0 ? null : _sendOtp,
-                        child: Text(
-                            _countdown > 0 ? '${_countdown}s' : 'Get OTP',
-                            style: TextStyle(
-                                color:
-                                    _countdown > 0 ? Colors.black38 : _accent,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13))),
-                validator: (v) => (v == null || v.isEmpty)
-                    ? 'Email required'
-                    : !v.contains('@')
-                        ? 'Enter valid email'
-                        : null),
-            if (_otpSent) ...[
-              const SizedBox(height: 14),
-              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          ),
+          const SizedBox(height: 14),
+          _field(
+            _phoneCtrl,
+            'Phone Number (optional)',
+            Icons.phone_outlined,
+            type: TextInputType.phone,
+          ),
+          const SizedBox(height: 14),
+          if (_role == 'Student') ...[
+            _field(
+              _rollCtrl,
+              'Roll Number',
+              Icons.badge_outlined,
+              validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
+            ),
+            const SizedBox(height: 14),
+            _field(
+              _parentCtrl,
+              'Parent Email',
+              Icons.family_restroom_outlined,
+              type: TextInputType.emailAddress,
+              validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
+            ),
+            const SizedBox(height: 14),
+          ],
+          if (_role == 'Faculty') ...[
+            _field(
+              _empCtrl,
+              'Employee ID',
+              Icons.work_outline,
+              validator: (v) => (v == null || v.isEmpty) ? 'Required' : null,
+            ),
+            const SizedBox(height: 14),
+          ],
+          _sectionBar('Account Info'),
+          const SizedBox(height: 16),
+          _field(
+            _regEmailCtrl,
+            'Email Address',
+            Icons.email_outlined,
+            type: TextInputType.emailAddress,
+            suffix: _otpSending
+                ? Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: _accent,
+                      ),
+                    ),
+                  )
+                : TextButton(
+                    onPressed: _countdown > 0 ? null : _sendOtp,
+                    child: Text(
+                      _countdown > 0 ? '${_countdown}s' : 'Get OTP',
+                      style: TextStyle(
+                        color: _countdown > 0 ? Colors.black38 : _accent,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+            validator: (v) => (v == null || v.isEmpty)
+                ? 'Email required'
+                : !v.contains('@')
+                    ? 'Enter valid email'
+                    : null,
+          ),
+          if (_otpSent) ...[
+            const SizedBox(height: 14),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Expanded(
                   child: TextFormField(
                     controller: _otpCtrl,
                     keyboardType: TextInputType.number,
                     inputFormatters: [
                       FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(6)
+                      LengthLimitingTextInputFormatter(6),
                     ],
                     style: const TextStyle(fontSize: 14, color: Colors.black87),
-                    decoration: _dec('Enter OTP', Icons.vpn_key_outlined,
-                        suffix: _otpVerified
-                            ? const Icon(Icons.check_circle_rounded,
-                                color: AppColors.accent, size: 20)
-                            : null),
+                    decoration: _dec(
+                      'Enter OTP',
+                      Icons.vpn_key_outlined,
+                      suffix: _otpVerified
+                          ? const Icon(
+                              Icons.check_circle_rounded,
+                              color: AppColors.accent,
+                              size: 20,
+                            )
+                          : null,
+                    ),
                     validator: (v) =>
                         (v == null || v.isEmpty) ? 'Enter OTP' : null,
                   ),
@@ -2978,47 +3529,69 @@ class _AuthScreenState extends State<AuthScreen> {
                           _otpVerified ? AppColors.accent : _accent,
                       foregroundColor: AppColors.white,
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 14),
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
                       shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14)),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
                     ),
                     onPressed: _otpVerified ? null : _verifyOtp,
-                    child: Text(_otpVerified ? '✓' : 'Verify',
-                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                    child: Text(
+                      _otpVerified ? '✓' : 'Verify',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
                   ),
                 ),
-              ]),
-              if (_otpVerified)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6, left: 4),
-                  child: Row(children: const [
-                    Icon(Icons.check_circle_rounded,
-                        color: AppColors.accent, size: 14),
+              ],
+            ),
+            if (_otpVerified)
+              Padding(
+                padding: const EdgeInsets.only(top: 6, left: 4),
+                child: Row(
+                  children: const [
+                    Icon(
+                      Icons.check_circle_rounded,
+                      color: AppColors.accent,
+                      size: 14,
+                    ),
                     SizedBox(width: 4),
-                    Text('Email verified successfully',
-                        style: TextStyle(
-                            fontSize: 12,
-                            color: AppColors.accent,
-                            fontWeight: FontWeight.w500)),
-                  ]),
+                    Text(
+                      'Email verified successfully',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: AppColors.accent,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
                 ),
-            ],
-            const SizedBox(height: 14),
-            _passField(_passCtrl, 'Password', Icons.lock_outline,
-                visible: _regPassVis,
-                onToggle: () => setState(() => _regPassVis = !_regPassVis),
-                validator: (v) =>
-                    (v == null || v.length < 6) ? 'Min 6 characters' : null),
-            const SizedBox(height: 14),
-            _passField(
-                _confirmCtrl, 'Confirm Password', Icons.lock_clock_outlined,
-                visible: _confirmVis,
-                onToggle: () => setState(() => _confirmVis = !_confirmVis),
-                validator: (v) =>
-                    v != _passCtrl.text ? 'Passwords do not match' : null),
-            const SizedBox(height: 28),
-            _btn('CREATE ACCOUNT', _register),
-          ]),
+              ),
+          ],
+          const SizedBox(height: 14),
+          _passField(
+            _passCtrl,
+            'Password',
+            Icons.lock_outline,
+            visible: _regPassVis,
+            onToggle: () => setState(() => _regPassVis = !_regPassVis),
+            validator: (v) =>
+                (v == null || v.length < 6) ? 'Min 6 characters' : null,
+          ),
+          const SizedBox(height: 14),
+          _passField(
+            _confirmCtrl,
+            'Confirm Password',
+            Icons.lock_clock_outlined,
+            visible: _confirmVis,
+            onToggle: () => setState(() => _confirmVis = !_confirmVis),
+            validator: (v) =>
+                v != _passCtrl.text ? 'Passwords do not match' : null,
+          ),
+          const SizedBox(height: 28),
+          _btn('CREATE ACCOUNT', _register),
+        ],
+      ),
     );
   }
 
@@ -3040,9 +3613,10 @@ class _AuthScreenState extends State<AuthScreen> {
             style: const TextStyle(fontSize: 14, color: Colors.black54),
             children: [
               TextSpan(
-                  text: _isLogin
-                      ? "Don't have an account? "
-                      : "Already have an account? "),
+                text: _isLogin
+                    ? "Don't have an account? "
+                    : "Already have an account? ",
+              ),
               TextSpan(
                 text: _isLogin ? 'Register Now' : 'Login',
                 style: TextStyle(color: _accent, fontWeight: FontWeight.bold),
@@ -3054,16 +3628,23 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
-  Widget _sectionBar(String title) => Row(children: [
-        Container(
+  Widget _sectionBar(String title) => Row(
+        children: [
+          Container(
             width: 4,
             height: 20,
             decoration: BoxDecoration(
-                color: _accent, borderRadius: BorderRadius.circular(4))),
-        const SizedBox(width: 8),
-        Text(title,
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-      ]);
+              color: _accent,
+              borderRadius: BorderRadius.circular(4),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+        ],
+      );
 
   InputDecoration _dec(String label, IconData icon, {Widget? suffix}) {
     return InputDecoration(
@@ -3076,17 +3657,21 @@ class _AuthScreenState extends State<AuthScreen> {
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
       enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
+      ),
       focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: BorderSide(color: _accent, width: 2)),
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(color: _accent, width: 2),
+      ),
       errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: AppColors.errorColor, width: 1)),
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(color: AppColors.errorColor, width: 1),
+      ),
       focusedErrorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(14),
-          borderSide: const BorderSide(color: AppColors.errorColor, width: 2)),
+        borderRadius: BorderRadius.circular(14),
+        borderSide: const BorderSide(color: AppColors.errorColor, width: 2),
+      ),
     );
   }
 
@@ -3122,17 +3707,18 @@ class _AuthScreenState extends State<AuthScreen> {
       obscureText: !visible,
       validator: validator,
       style: const TextStyle(fontSize: 14, color: Colors.black87),
-      decoration: _dec(label, icon,
-          suffix: IconButton(
-            icon: Icon(
-              visible
-                  ? Icons.visibility_off_outlined
-                  : Icons.visibility_outlined,
-              color: _accent,
-              size: 20,
-            ),
-            onPressed: onToggle,
-          )),
+      decoration: _dec(
+        label,
+        icon,
+        suffix: IconButton(
+          icon: Icon(
+            visible ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+            color: _accent,
+            size: 20,
+          ),
+          onPressed: onToggle,
+        ),
+      ),
     );
   }
 
@@ -3146,8 +3732,9 @@ class _AuthScreenState extends State<AuthScreen> {
           foregroundColor: AppColors.white,
           elevation: 4,
           shadowColor: _accent.withOpacity(0.4),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
         ),
         onPressed: _loading ? null : action,
         child: _loading
@@ -3155,12 +3742,18 @@ class _AuthScreenState extends State<AuthScreen> {
                 width: 22,
                 height: 22,
                 child: CircularProgressIndicator(
-                    color: AppColors.white, strokeWidth: 2.5))
-            : Text(label,
+                  color: AppColors.white,
+                  strokeWidth: 2.5,
+                ),
+              )
+            : Text(
+                label,
                 style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                    letterSpacing: 1)),
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                  letterSpacing: 1,
+                ),
+              ),
       ),
     );
   }
@@ -3217,7 +3810,9 @@ class _PeopleScreenState extends State<PeopleScreen>
     }
     _locationSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.high, distanceFilter: 5),
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 5,
+      ),
     ).listen((pos) {
       if (mounted) setState(() => _myPosition = pos);
     });
@@ -3232,13 +3827,15 @@ class _PeopleScreenState extends State<PeopleScreen>
 
   void _snack(String msg, {bool error = false}) {
     ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(msg),
-      backgroundColor: error ? AppColors.errorColor : AppColors.accent,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      margin: const EdgeInsets.all(16),
-    ));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: error ? AppColors.errorColor : AppColors.accent,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.all(16),
+      ),
+    );
   }
 
   @override
@@ -3246,12 +3843,18 @@ class _PeopleScreenState extends State<PeopleScreen>
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: _buildAppBar(),
-      body: TabBarView(controller: _tab, children: [
-        _NearbyTab(myPosition: _myPosition, myProfile: _myProfile),
-        _ConnectionsTab(myProfile: _myProfile, onSnack: _snack),
-        _FindPeopleTab(
-            myProfile: _myProfile, myPosition: _myPosition, onSnack: _snack),
-      ]),
+      body: TabBarView(
+        controller: _tab,
+        children: [
+          _NearbyTab(myPosition: _myPosition, myProfile: _myProfile),
+          _ConnectionsTab(myProfile: _myProfile, onSnack: _snack),
+          _FindPeopleTab(
+            myProfile: _myProfile,
+            myPosition: _myPosition,
+            onSnack: _snack,
+          ),
+        ],
+      ),
     );
   }
 
@@ -3260,91 +3863,117 @@ class _PeopleScreenState extends State<PeopleScreen>
       backgroundColor: AppColors.primary,
       elevation: 0,
       leading: const BackButton(color: AppColors.white),
-      title: Row(children: [
-        CircleAvatar(
-          radius: 18,
-          backgroundColor: Colors.white.withOpacity(0.2),
-          child: Text(_myProfile?.initials ?? '?',
+      title: Row(
+        children: [
+          CircleAvatar(
+            radius: 18,
+            backgroundColor: Colors.white.withOpacity(0.2),
+            child: Text(
+              _myProfile?.initials ?? '?',
               style: const TextStyle(
-                  color: AppColors.white,
-                  fontSize: 13,
-                  fontWeight: FontWeight.bold)),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(_myProfile?.fullName ?? 'Loading...',
-              style: const TextStyle(
-                  color: AppColors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.bold)),
-          Text(
-            _myPosition != null
-                ? '${_myPosition!.latitude.toStringAsFixed(4)}, '
-                    '${_myPosition!.longitude.toStringAsFixed(4)}'
-                : _locationLoading
-                    ? 'Getting GPS...'
-                    : 'Location unavailable',
-            style: const TextStyle(color: Colors.white60, fontSize: 11),
+                color: AppColors.white,
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
           ),
-        ])),
-      ]),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _myProfile?.fullName ?? 'Loading...',
+                  style: const TextStyle(
+                    color: AppColors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                Text(
+                  _myPosition != null
+                      ? '${_myPosition!.latitude.toStringAsFixed(4)}, '
+                          '${_myPosition!.longitude.toStringAsFixed(4)}'
+                      : _locationLoading
+                          ? 'Getting GPS...'
+                          : 'Location unavailable',
+                  style: const TextStyle(color: Colors.white60, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
       actions: [
         Padding(
           padding: const EdgeInsets.only(right: 4),
           child: Center(
-              child: Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(
-              color: _myPosition != null ? AppColors.accent : Colors.orange,
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
+            child: Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(
+                color: _myPosition != null ? AppColors.accent : Colors.orange,
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
                     color:
                         (_myPosition != null ? AppColors.accent : Colors.orange)
                             .withOpacity(0.5),
-                    blurRadius: 6)
-              ],
+                    blurRadius: 6,
+                  ),
+                ],
+              ),
             ),
-          )),
+          ),
         ),
-        Stack(alignment: Alignment.center, children: [
-          IconButton(
-            icon:
-                const Icon(Icons.notifications_rounded, color: AppColors.white),
-            onPressed: () => _showNotifications(context),
-          ),
-          Positioned(
-            top: 10,
-            right: 10,
-            child: StreamBuilder<QuerySnapshot>(
-              stream: FirebaseFirestore.instance
-                  .collection('connection_requests')
-                  .where('toUid',
-                      isEqualTo: FirebaseAuth.instance.currentUser?.uid)
-                  .where('status', isEqualTo: 'pending')
-                  .snapshots(),
-              builder: (context, snap) {
-                final count = snap.data?.docs.length ?? 0;
-                if (count == 0) return const SizedBox.shrink();
-                return Container(
-                  width: 16,
-                  height: 16,
-                  decoration: const BoxDecoration(
-                      color: AppColors.errorColor, shape: BoxShape.circle),
-                  child: Center(
-                      child: Text('$count',
-                          style: const TextStyle(
-                              color: AppColors.white,
-                              fontSize: 9,
-                              fontWeight: FontWeight.bold))),
-                );
-              },
+        Stack(
+          alignment: Alignment.center,
+          children: [
+            IconButton(
+              icon: const Icon(
+                Icons.notifications_rounded,
+                color: AppColors.white,
+              ),
+              onPressed: () => _showNotifications(context),
             ),
-          ),
-        ]),
+            Positioned(
+              top: 10,
+              right: 10,
+              child: StreamBuilder<QuerySnapshot>(
+                stream: FirebaseFirestore.instance
+                    .collection('connection_requests')
+                    .where(
+                      'toUid',
+                      isEqualTo: FirebaseAuth.instance.currentUser?.uid,
+                    )
+                    .where('status', isEqualTo: 'pending')
+                    .snapshots(),
+                builder: (context, snap) {
+                  final count = snap.data?.docs.length ?? 0;
+                  if (count == 0) return const SizedBox.shrink();
+                  return Container(
+                    width: 16,
+                    height: 16,
+                    decoration: const BoxDecoration(
+                      color: AppColors.errorColor,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Center(
+                      child: Text(
+                        '$count',
+                        style: const TextStyle(
+                          color: AppColors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
         const SizedBox(width: 4),
       ],
       bottom: TabBar(
@@ -3369,7 +3998,8 @@ class _PeopleScreenState extends State<PeopleScreen>
       context: context,
       useRootNavigator: true,
       shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       builder: (sheetCtx) =>
           _NotificationsPanel(currentUid: uid, parentContext: context),
     );
@@ -3391,54 +4021,80 @@ class _NotificationsPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.all(20),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Notifications',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-        const SizedBox(height: 16),
-        Expanded(
-          child: StreamBuilder<QuerySnapshot>(
-            stream: FirebaseFirestore.instance
-                .collection('connection_requests')
-                .where('toUid', isEqualTo: currentUid)
-                .where('status', isEqualTo: 'pending')
-                .snapshots(),
-            builder: (context, snap) {
-              if (!snap.hasData || snap.data!.docs.isEmpty) {
-                return const Center(
-                    child: Text('No new notifications',
-                        style: TextStyle(color: Colors.black45)));
-              }
-              final docs = snap.data!.docs;
-              return ListView.separated(
-                itemCount: docs.length,
-                separatorBuilder: (_, __) => const Divider(height: 1),
-                itemBuilder: (context, i) {
-                  final d = docs[i].data() as Map<String, dynamic>;
-                  return ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: AppColors.primary.withOpacity(0.15),
-                      child: Text((d['fromName'] ?? '?')[0].toUpperCase(),
-                          style: const TextStyle(
-                              color: AppColors.primary,
-                              fontWeight: FontWeight.bold)),
-                    ),
-                    title: Text(d['fromName'] ?? 'Someone',
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    subtitle: const Text('Wants to connect with you'),
-                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                      _reqBtn(
-                          context, docs[i].id, d, 'accepted', AppColors.accent),
-                      const SizedBox(width: 8),
-                      _reqBtn(context, docs[i].id, d, 'rejected',
-                          AppColors.errorColor),
-                    ]),
-                  );
-                },
-              );
-            },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Notifications',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
           ),
-        ),
-      ]),
+          const SizedBox(height: 16),
+          Expanded(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: FirebaseFirestore.instance
+                  .collection('connection_requests')
+                  .where('toUid', isEqualTo: currentUid)
+                  .where('status', isEqualTo: 'pending')
+                  .snapshots(),
+              builder: (context, snap) {
+                if (!snap.hasData || snap.data!.docs.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      'No new notifications',
+                      style: TextStyle(color: Colors.black45),
+                    ),
+                  );
+                }
+                final docs = snap.data!.docs;
+                return ListView.separated(
+                  itemCount: docs.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, i) {
+                    final d = docs[i].data() as Map<String, dynamic>;
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: AppColors.primary.withOpacity(0.15),
+                        child: Text(
+                          (d['fromName'] ?? '?')[0].toUpperCase(),
+                          style: const TextStyle(
+                            color: AppColors.primary,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      title: Text(
+                        d['fromName'] ?? 'Someone',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      subtitle: const Text('Wants to connect with you'),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _reqBtn(
+                            context,
+                            docs[i].id,
+                            d,
+                            'accepted',
+                            AppColors.accent,
+                          ),
+                          const SizedBox(width: 8),
+                          _reqBtn(
+                            context,
+                            docs[i].id,
+                            d,
+                            'rejected',
+                            AppColors.errorColor,
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -3467,15 +4123,20 @@ class _NotificationsPanel extends StatelessWidget {
             'createdAt': FieldValue.serverTimestamp(),
           });
           if (ctx.mounted) Navigator.pop(ctx);
-          ScaffoldMessenger.of(parentContext).showSnackBar(SnackBar(
-            content: Text('Connected with ${data['fromName']}! '
-                'You can now see each other\'s location.'),
-            backgroundColor: AppColors.accent,
-            behavior: SnackBarBehavior.floating,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            margin: const EdgeInsets.all(16),
-          ));
+          ScaffoldMessenger.of(parentContext).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Connected with ${data['fromName']}! '
+                'You can now see each other\'s location.',
+              ),
+              backgroundColor: AppColors.accent,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+              margin: const EdgeInsets.all(16),
+            ),
+          );
         } else {
           if (ctx.mounted) Navigator.pop(ctx);
         }
@@ -3487,9 +4148,14 @@ class _NotificationsPanel extends StatelessWidget {
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: color.withOpacity(0.3)),
         ),
-        child: Text(status == 'accepted' ? 'Accept' : 'Decline',
-            style: TextStyle(
-                color: color, fontSize: 12, fontWeight: FontWeight.bold)),
+        child: Text(
+          status == 'accepted' ? 'Accept' : 'Decline',
+          style: TextStyle(
+            color: color,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
       ),
     );
   }
@@ -3529,40 +4195,55 @@ class _NearbyTabState extends State<_NearbyTab> {
   @override
   Widget build(BuildContext context) {
     if (widget.myPosition == null) return _locationError();
-    return Column(children: [
-      Padding(
-        padding: const EdgeInsets.all(12),
-        child: Container(
-          decoration: BoxDecoration(
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Container(
+            decoration: BoxDecoration(
               color: AppColors.white,
               borderRadius: BorderRadius.circular(16),
               boxShadow: [
                 BoxShadow(
-                    color: Colors.black.withOpacity(0.08),
-                    blurRadius: 8,
-                    offset: const Offset(0, 3))
-              ]),
-          child: TextField(
-            decoration: InputDecoration(
-              hintText: 'Search nearby places or people…',
-              hintStyle: const TextStyle(fontSize: 14, color: Colors.black38),
-              prefixIcon: const Icon(Icons.search_rounded,
-                  color: AppColors.primary, size: 22),
-              suffixIcon: widget.myPosition != null
-                  ? const Icon(Icons.my_location_rounded,
-                      color: AppColors.accent, size: 22)
-                  : const Icon(Icons.location_off_rounded,
-                      color: Colors.black38, size: 22),
-              border: InputBorder.none,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  color: Colors.black.withOpacity(0.08),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: 'Search nearby places or people…',
+                hintStyle: const TextStyle(fontSize: 14, color: Colors.black38),
+                prefixIcon: const Icon(
+                  Icons.search_rounded,
+                  color: AppColors.primary,
+                  size: 22,
+                ),
+                suffixIcon: widget.myPosition != null
+                    ? const Icon(
+                        Icons.my_location_rounded,
+                        color: AppColors.accent,
+                        size: 22,
+                      )
+                    : const Icon(
+                        Icons.location_off_rounded,
+                        color: Colors.black38,
+                        size: 22,
+                      ),
+                border: InputBorder.none,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+              ),
             ),
           ),
         ),
-      ),
-      Expanded(flex: 3, child: _mapLayer()),
-      Expanded(flex: 2, child: _nearbyList()),
-    ]);
+        Expanded(flex: 3, child: _mapLayer()),
+        Expanded(flex: 2, child: _nearbyList()),
+      ],
+    );
   }
 
   Widget _mapLayer() {
@@ -3573,34 +4254,45 @@ class _NearbyTabState extends State<_NearbyTab> {
         final markers = <Marker>[];
 
         if (widget.myPosition != null) {
-          markers.add(Marker(
-            point: LatLng(
-                widget.myPosition!.latitude, widget.myPosition!.longitude),
-            width: 44,
-            height: 44,
-            child: Container(
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: AppColors.accent,
-                shape: BoxShape.circle,
-                border: Border.all(color: Colors.white, width: 3),
-                boxShadow: [
-                  BoxShadow(
-                      color: AppColors.accent.withOpacity(0.5), blurRadius: 8)
-                ],
+          markers.add(
+            Marker(
+              point: LatLng(
+                widget.myPosition!.latitude,
+                widget.myPosition!.longitude,
               ),
-              child: const Icon(Icons.person_rounded,
-                  color: Colors.white, size: 18),
+              width: 44,
+              height: 44,
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: AppColors.accent,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 3),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.accent.withOpacity(0.5),
+                      blurRadius: 8,
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.person_rounded,
+                  color: Colors.white,
+                  size: 18,
+                ),
+              ),
             ),
-          ));
+          );
         }
 
         if (snap.hasData) {
           for (final doc in snap.data!.docs) {
             if (doc.id == myUid) continue;
             final p = CampusPerson.fromFirestore(
-                doc.id, doc.data() as Map<String, dynamic>);
+              doc.id,
+              doc.data() as Map<String, dynamic>,
+            );
             final gp = p.displayLocation;
             if (gp == null) continue;
 
@@ -3612,32 +4304,41 @@ class _NearbyTabState extends State<_NearbyTab> {
                         : AppColors.primary)
                 : AppColors.offlineGrey;
 
-            markers.add(Marker(
-              point: LatLng(gp.latitude, gp.longitude),
-              width: 44,
-              height: 44,
-              child: GestureDetector(
-                onTap: () => _showPersonDialog(context, p),
-                child: Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: dotColor,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 2),
-                    boxShadow: [
-                      BoxShadow(color: dotColor.withOpacity(0.4), blurRadius: 6)
-                    ],
+            markers.add(
+              Marker(
+                point: LatLng(gp.latitude, gp.longitude),
+                width: 44,
+                height: 44,
+                child: GestureDetector(
+                  onTap: () => _showPersonDialog(context, p),
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: dotColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                      boxShadow: [
+                        BoxShadow(
+                          color: dotColor.withOpacity(0.4),
+                          blurRadius: 6,
+                        ),
+                      ],
+                    ),
+                    child: Center(
+                      child: Text(
+                        p.initials,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
                   ),
-                  child: Center(
-                      child: Text(p.initials,
-                          style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold))),
                 ),
               ),
-            ));
+            );
           }
         }
 
@@ -3645,7 +4346,9 @@ class _NearbyTabState extends State<_NearbyTab> {
           mapController: _mapController,
           options: MapOptions(
             initialCenter: LatLng(
-                widget.myPosition!.latitude, widget.myPosition!.longitude),
+              widget.myPosition!.latitude,
+              widget.myPosition!.longitude,
+            ),
             initialZoom: 17.0,
             maxZoom: 19.0,
             minZoom: 3.0,
@@ -3670,31 +4373,40 @@ class _NearbyTabState extends State<_NearbyTab> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: Text(p.fullName),
         content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(p.role),
-              const SizedBox(height: 4),
-              Text(p.isOnline ? '🟢 Online' : '⚫ Offline',
-                  style: TextStyle(
-                      color: p.isOnline
-                          ? AppColors.accent
-                          : AppColors.offlineGrey)),
-              if (!p.isOnline) ...[
-                const SizedBox(height: 6),
-                Text('Last seen: ${LastSeenHelper.format(p.lastSeen)}',
-                    style: const TextStyle(
-                        fontSize: 12, color: AppColors.offlineGrey)),
-              ],
-              const SizedBox(height: 8),
-              const Text('Location:',
-                  style: TextStyle(fontSize: 12, color: Colors.black45)),
-              _PlaceNameWidget(geoPoint: p.displayLocation),
-            ]),
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(p.role),
+            const SizedBox(height: 4),
+            Text(
+              p.isOnline ? '🟢 Online' : '⚫ Offline',
+              style: TextStyle(
+                color: p.isOnline ? AppColors.accent : AppColors.offlineGrey,
+              ),
+            ),
+            if (!p.isOnline) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Last seen: ${LastSeenHelper.format(p.lastSeen)}',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: AppColors.offlineGrey,
+                ),
+              ),
+            ],
+            const SizedBox(height: 8),
+            const Text(
+              'Location:',
+              style: TextStyle(fontSize: 12, color: Colors.black45),
+            ),
+            _PlaceNameWidget(geoPoint: p.displayLocation),
+          ],
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close')),
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
         ],
       ),
     );
@@ -3703,75 +4415,106 @@ class _NearbyTabState extends State<_NearbyTab> {
   Widget _nearbyList() {
     if (widget.myPosition == null) {
       return const Center(
-          child: Text('Enable location to see nearby people',
-              style: TextStyle(color: Colors.black45)));
+        child: Text(
+          'Enable location to see nearby people',
+          style: TextStyle(color: Colors.black45),
+        ),
+      );
     }
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance.collection('users').snapshots(),
       builder: (context, snap) {
         if (!snap.hasData) {
           return const Center(
-              child: CircularProgressIndicator(color: AppColors.primary));
+            child: CircularProgressIndicator(color: AppColors.primary),
+          );
         }
         final myUid = FirebaseAuth.instance.currentUser?.uid;
-        final myLatLng =
-            LatLng(widget.myPosition!.latitude, widget.myPosition!.longitude);
+        final myLatLng = LatLng(
+          widget.myPosition!.latitude,
+          widget.myPosition!.longitude,
+        );
         final people = snap.data!.docs
             .where((d) => d.id != myUid)
-            .map((d) => CampusPerson.fromFirestore(
-                d.id, d.data() as Map<String, dynamic>))
+            .map(
+              (d) => CampusPerson.fromFirestore(
+                d.id,
+                d.data() as Map<String, dynamic>,
+              ),
+            )
             .where((p) => p.location != null)
             .toList();
-        final ranked = VerilogDistanceRanker.rank(people, myLatLng)
-            .where((r) => r.distanceMeters <= 2000)
-            .toList();
+        final ranked = VerilogDistanceRanker.rank(
+          people,
+          myLatLng,
+        ).where((r) => r.distanceMeters <= 2000).toList();
         if (ranked.isEmpty) {
           return const Center(
-              child: Text('No one nearby right now',
-                  style: TextStyle(color: Colors.black45)));
-        }
-        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-            child: Text('${ranked.length} people nearby',
-                style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.black54)),
-          ),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: ranked.length,
-              itemBuilder: (_, i) => _NearbyTile(result: ranked[i]),
+            child: Text(
+              'No one nearby right now',
+              style: TextStyle(color: Colors.black45),
             ),
-          ),
-        ]);
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: Text(
+                '${ranked.length} people nearby',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black54,
+                ),
+              ),
+            ),
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                itemCount: ranked.length,
+                itemBuilder: (_, i) => _NearbyTile(result: ranked[i]),
+              ),
+            ),
+          ],
+        );
       },
     );
   }
 
   Widget _locationError() => Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const Icon(Icons.location_off_rounded, size: 60, color: Colors.black26),
-        const SizedBox(height: 12),
-        const Text('Location permission required',
-            style: TextStyle(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 6),
-        const Text('Enable location to see nearby people',
-            style: TextStyle(color: Colors.black45, fontSize: 13)),
-        const SizedBox(height: 16),
-        ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primary,
-              foregroundColor: AppColors.white,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12))),
-          onPressed: () async => await Geolocator.openLocationSettings(),
-          icon: const Icon(Icons.settings_rounded, size: 18),
-          label: const Text('Open Settings'),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.location_off_rounded,
+                size: 60, color: Colors.black26),
+            const SizedBox(height: 12),
+            const Text(
+              'Location permission required',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Enable location to see nearby people',
+              style: TextStyle(color: Colors.black45, fontSize: 13),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: AppColors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: () async => await Geolocator.openLocationSettings(),
+              icon: const Icon(Icons.settings_rounded, size: 18),
+              label: const Text('Open Settings'),
+            ),
+          ],
         ),
-      ]));
+      );
 }
 
 class _NearbyTile extends StatelessWidget {
@@ -3789,18 +4532,25 @@ class _NearbyTile extends StatelessWidget {
       shadowColor: Colors.black12,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(children: [
-          Stack(children: [
-            CircleAvatar(
-                radius: 22,
-                backgroundColor: p.roleColor.withOpacity(0.15),
-                child: Text(p.initials,
+        child: Row(
+          children: [
+            Stack(
+              children: [
+                CircleAvatar(
+                  radius: 22,
+                  backgroundColor: p.roleColor.withOpacity(0.15),
+                  child: Text(
+                    p.initials,
                     style: TextStyle(
-                        color: p.roleColor, fontWeight: FontWeight.bold))),
-            Positioned(
-                bottom: 0,
-                right: 0,
-                child: Container(
+                      color: p.roleColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
                     width: 12,
                     height: 12,
                     decoration: BoxDecoration(
@@ -3808,38 +4558,62 @@ class _NearbyTile extends StatelessWidget {
                           p.isOnline ? AppColors.accent : AppColors.offlineGrey,
                       shape: BoxShape.circle,
                       border: Border.all(color: AppColors.white, width: 2),
-                    ))),
-          ]),
-          const SizedBox(width: 12),
-          Expanded(
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                Text(p.fullName,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 14)),
-                Text(p.role,
-                    style:
-                        const TextStyle(color: Colors.black45, fontSize: 12)),
-                _OfflineBadge(person: p, compact: true),
-              ])),
-          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-              decoration: BoxDecoration(
-                color: c.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: c.withOpacity(0.3)),
-              ),
-              child: Text(result.distanceText,
-                  style: TextStyle(
-                      color: c, fontSize: 12, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 4),
-            Text(result.priorityLabel,
-                style: TextStyle(color: c, fontSize: 11)),
-          ]),
-        ]),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    p.fullName,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                  Text(
+                    p.role,
+                    style: const TextStyle(color: Colors.black45, fontSize: 12),
+                  ),
+                  _OfflineBadge(person: p, compact: true),
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: c.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: c.withOpacity(0.3)),
+                  ),
+                  child: Text(
+                    result.distanceText,
+                    style: TextStyle(
+                      color: c,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  result.priorityLabel,
+                  style: TextStyle(color: c, fontSize: 11),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3864,7 +4638,8 @@ class _ConnectionsTab extends StatelessWidget {
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(
-              child: CircularProgressIndicator(color: AppColors.primary));
+            child: CircularProgressIndicator(color: AppColors.primary),
+          );
         }
         final docs = snap.data?.docs ?? [];
         if (docs.isEmpty) return _empty();
@@ -3877,62 +4652,90 @@ class _ConnectionsTab extends StatelessWidget {
             .where((u) => u.isNotEmpty)
             .toList();
 
-        return Column(children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
-            child: Row(children: [
-              const Icon(Icons.people_rounded,
-                  color: AppColors.primary, size: 20),
-              const SizedBox(width: 8),
-              Text('Connections (${docs.length})',
-                  style: const TextStyle(
-                      fontSize: 16, fontWeight: FontWeight.bold)),
-            ]),
-          ),
-          Expanded(
-            child: FutureBuilder<List<CampusPerson>>(
-              future: _fetch(otherUids),
-              builder: (context, pSnap) {
-                if (!pSnap.hasData) {
-                  return const Center(
-                      child:
-                          CircularProgressIndicator(color: AppColors.primary));
-                }
-                return ListView.builder(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  itemCount: pSnap.data!.length,
-                  itemBuilder: (_, i) => _ConnTile(person: pSnap.data![i]),
-                );
-              },
+        return Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.people_rounded,
+                    color: AppColors.primary,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Connections (${docs.length})',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-        ]);
+            Expanded(
+              child: FutureBuilder<List<CampusPerson>>(
+                future: _fetch(otherUids),
+                builder: (context, pSnap) {
+                  if (!pSnap.hasData) {
+                    return const Center(
+                      child: CircularProgressIndicator(
+                        color: AppColors.primary,
+                      ),
+                    );
+                  }
+                  return ListView.builder(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    itemCount: pSnap.data!.length,
+                    itemBuilder: (_, i) => _ConnTile(person: pSnap.data![i]),
+                  );
+                },
+              ),
+            ),
+          ],
+        );
       },
     );
   }
 
   Future<List<CampusPerson>> _fetch(List<String> uids) async {
-    final results = await Future.wait(uids.map((uid) => FirebaseFirestore
-        .instance
-        .collection('users')
-        .doc(uid)
-        .get()
-        .then((d) =>
-            d.exists ? CampusPerson.fromFirestore(uid, d.data()!) : null)));
+    final results = await Future.wait(
+      uids.map(
+        (uid) => FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .get()
+            .then(
+              (d) =>
+                  d.exists ? CampusPerson.fromFirestore(uid, d.data()!) : null,
+            ),
+      ),
+    );
     return results.whereType<CampusPerson>().toList();
   }
 
   Widget _empty() => Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: const [
-        Icon(Icons.group_add_rounded, size: 64, color: Colors.black26),
-        SizedBox(height: 12),
-        Text('No connections yet',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-        SizedBox(height: 6),
-        Text('Find and add people from the Find tab',
-            style: TextStyle(color: Colors.black45, fontSize: 13)),
-      ]));
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: const [
+            Icon(Icons.group_add_rounded, size: 64, color: Colors.black26),
+            SizedBox(height: 12),
+            Text(
+              'No connections yet',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            SizedBox(height: 6),
+            Text(
+              'Find and add people from the Find tab',
+              style: TextStyle(color: Colors.black45, fontSize: 13),
+            ),
+          ],
+        ),
+      );
 }
 
 class _ConnTile extends StatelessWidget {
@@ -3948,18 +4751,25 @@ class _ConnTile extends StatelessWidget {
       shadowColor: Colors.black12,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        child: Row(children: [
-          Stack(children: [
-            CircleAvatar(
-                radius: 24,
-                backgroundColor: person.roleColor.withOpacity(0.15),
-                child: Text(person.initials,
+        child: Row(
+          children: [
+            Stack(
+              children: [
+                CircleAvatar(
+                  radius: 24,
+                  backgroundColor: person.roleColor.withOpacity(0.15),
+                  child: Text(
+                    person.initials,
                     style: TextStyle(
-                        color: person.roleColor, fontWeight: FontWeight.bold))),
-            Positioned(
-                bottom: 0,
-                right: 0,
-                child: Container(
+                      color: person.roleColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
                     width: 13,
                     height: 13,
                     decoration: BoxDecoration(
@@ -3968,53 +4778,72 @@ class _ConnTile extends StatelessWidget {
                           : AppColors.offlineGrey,
                       shape: BoxShape.circle,
                       border: Border.all(color: AppColors.white, width: 2),
-                    ))),
-          ]),
-          const SizedBox(width: 12),
-          Expanded(
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(width: 12),
+            Expanded(
               child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                Text(person.fullName,
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-                Text(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    person.fullName,
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  Text(
                     '${person.role} · '
                     '${person.isOnline ? "Online" : "Offline"}',
-                    style:
-                        const TextStyle(fontSize: 12, color: Colors.black45)),
-                if (person.displayLocation != null)
-                  _PlaceNameWidget(
-                    geoPoint: person.displayLocation,
-                    style:
-                        const TextStyle(fontSize: 11, color: AppColors.primary),
+                    style: const TextStyle(fontSize: 12, color: Colors.black45),
                   ),
-                _OfflineBadge(person: person, compact: true),
-              ])),
-          const SizedBox(width: 8),
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            _ib(Icons.location_on_rounded, AppColors.accent, () {
-              Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => _PersonLocationScreen(person: person)));
-            }),
-            const SizedBox(width: 6),
-            _ib(Icons.call_rounded, AppColors.primary, () {
-              Navigator.push(
-                  context,
-                  MaterialPageRoute(
+                  if (person.displayLocation != null)
+                    _PlaceNameWidget(
+                      geoPoint: person.displayLocation,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppColors.primary,
+                      ),
+                    ),
+                  _OfflineBadge(person: person, compact: true),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _ib(Icons.location_on_rounded, AppColors.accent, () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => _PersonLocationScreen(person: person),
+                    ),
+                  );
+                }),
+                const SizedBox(width: 6),
+                _ib(Icons.call_rounded, AppColors.primary, () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
                       builder: (_) =>
-                          InAppCallScreen(peer: person, isOutgoing: true)));
-            }),
-            const SizedBox(width: 6),
-            _ib(Icons.message_rounded, AppColors.purple, () {
-              Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => InAppChatScreen(peer: person)));
-            }),
-          ]),
-        ]),
+                          InAppCallScreen(peer: person, isOutgoing: true),
+                    ),
+                  );
+                }),
+                const SizedBox(width: 6),
+                _ib(Icons.message_rounded, AppColors.purple, () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => InAppChatScreen(peer: person),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -4057,8 +4886,10 @@ class _PersonLocationScreenState extends State<_PersonLocationScreen> {
 
   Future<void> _load() async {
     final myUid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    final connected =
-        await ConnectionService.areMutuallyConnected(myUid, widget.person.uid);
+    final connected = await ConnectionService.areMutuallyConnected(
+      myUid,
+      widget.person.uid,
+    );
 
     if (!connected) {
       if (mounted) {
@@ -4081,10 +4912,12 @@ class _PersonLocationScreenState extends State<_PersonLocationScreen> {
     final snap = await FirebaseFirestore.instance.collection('users').get();
     final connectedUids = await ConnectionService.getConnectedUids(myUid);
     final others = snap.docs
-        .where((d) =>
-            d.id != myUid &&
-            d.id != widget.person.uid &&
-            connectedUids.contains(d.id))
+        .where(
+          (d) =>
+              d.id != myUid &&
+              d.id != widget.person.uid &&
+              connectedUids.contains(d.id),
+        )
         .map((d) => CampusPerson.fromFirestore(d.id, d.data()))
         .toList();
 
@@ -4116,105 +4949,136 @@ class _PersonLocationScreenState extends State<_PersonLocationScreen> {
       backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: AppColors.primary,
-        title: Text(widget.person.fullName,
-            style: const TextStyle(color: AppColors.white)),
+        title: Text(
+          widget.person.fullName,
+          style: const TextStyle(color: AppColors.white),
+        ),
         leading: const BackButton(color: AppColors.white),
         actions: [
           IconButton(
             icon: const Icon(Icons.call_rounded, color: AppColors.white),
             onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => InAppCallScreen(
-                        peer: widget.person, isOutgoing: true))),
+              context,
+              MaterialPageRoute(
+                builder: (_) =>
+                    InAppCallScreen(peer: widget.person, isOutgoing: true),
+              ),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.message_rounded, color: AppColors.white),
             onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => InAppChatScreen(peer: widget.person))),
+              context,
+              MaterialPageRoute(
+                builder: (_) => InAppChatScreen(peer: widget.person),
+              ),
+            ),
           ),
         ],
       ),
       body: _loading
           ? const Center(
-              child: CircularProgressIndicator(color: AppColors.primary))
+              child: CircularProgressIndicator(color: AppColors.primary),
+            )
           : !_isConnected
               ? _accessDenied()
               : SingleChildScrollView(
                   padding: const EdgeInsets.all(16),
                   child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _targetCard(),
-                        const SizedBox(height: 20),
-                        _secTitle('People near ${widget.person.firstName}',
-                            '${_ranked.length} found', Icons.group_rounded),
-                        const SizedBox(height: 12),
-                        ..._ranked.take(10).map((r) =>
-                            _RankedCard(result: r, target: widget.person)),
-                        const SizedBox(height: 20),
-                        _secTitle('AI Decision Suggestions',
-                            'Powered by Claude', Icons.auto_awesome_rounded,
-                            color: AppColors.purple),
-                        const SizedBox(height: 12),
-                        if (_aiLoading)
-                          const Center(
-                              child: Padding(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _targetCard(),
+                      const SizedBox(height: 20),
+                      _secTitle(
+                        'People near ${widget.person.firstName}',
+                        '${_ranked.length} found',
+                        Icons.group_rounded,
+                      ),
+                      const SizedBox(height: 12),
+                      ..._ranked.take(10).map(
+                            (r) =>
+                                _RankedCard(result: r, target: widget.person),
+                          ),
+                      const SizedBox(height: 20),
+                      _secTitle(
+                        'AI Decision Suggestions',
+                        'Powered by Claude',
+                        Icons.auto_awesome_rounded,
+                        color: AppColors.purple,
+                      ),
+                      const SizedBox(height: 12),
+                      if (_aiLoading)
+                        const Center(
+                          child: Padding(
                             padding: EdgeInsets.all(20),
                             child: CircularProgressIndicator(
-                                color: AppColors.purple),
-                          ))
-                        else if (_aiSuggestions.isEmpty)
-                          const Text('No AI suggestions available.',
-                              style: TextStyle(color: Colors.black45))
-                        else
-                          ..._aiSuggestions.map((s) => _AiCard(suggestion: s)),
-                      ]),
+                              color: AppColors.purple,
+                            ),
+                          ),
+                        )
+                      else if (_aiSuggestions.isEmpty)
+                        const Text(
+                          'No AI suggestions available.',
+                          style: TextStyle(color: Colors.black45),
+                        )
+                      else
+                        ..._aiSuggestions.map((s) => _AiCard(suggestion: s)),
+                    ],
+                  ),
                 ),
     );
   }
 
   Widget _accessDenied() => Center(
-          child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: AppColors.errorColor.withOpacity(0.1),
-              shape: BoxShape.circle,
-            ),
-            child: const Icon(Icons.lock_rounded,
-                size: 56, color: AppColors.errorColor),
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: AppColors.errorColor.withOpacity(0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.lock_rounded,
+                  size: 56,
+                  color: AppColors.errorColor,
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Location Access Restricted',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'You need to be connected with '
+                '${widget.person.firstName} to view their location.',
+                style: const TextStyle(color: Colors.black54, fontSize: 14),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: AppColors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                ),
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.arrow_back_rounded, size: 18),
+                label: const Text('Go Back'),
+              ),
+            ],
           ),
-          const SizedBox(height: 20),
-          const Text('Location Access Restricted',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-              textAlign: TextAlign.center),
-          const SizedBox(height: 12),
-          Text(
-            'You need to be connected with '
-            '${widget.person.firstName} to view their location.',
-            style: const TextStyle(color: Colors.black54, fontSize: 14),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 24),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primary,
-              foregroundColor: AppColors.white,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            ),
-            onPressed: () => Navigator.pop(context),
-            icon: const Icon(Icons.arrow_back_rounded, size: 18),
-            label: const Text('Go Back'),
-          ),
-        ]),
-      ));
+        ),
+      );
 
   Widget _targetCard() {
     final p = widget.person;
@@ -4231,79 +5095,128 @@ class _PersonLocationScreenState extends State<_PersonLocationScreen> {
         ),
         borderRadius: BorderRadius.circular(20),
       ),
-      child: Row(children: [
-        CircleAvatar(
+      child: Row(
+        children: [
+          CircleAvatar(
             radius: 30,
             backgroundColor: Colors.white.withOpacity(0.25),
-            child: Text(p.initials,
-                style: const TextStyle(
-                    color: AppColors.white,
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold))),
-        const SizedBox(width: 14),
-        Expanded(
-            child:
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(p.fullName,
+            child: Text(
+              p.initials,
               style: const TextStyle(
-                  color: AppColors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold)),
-          Text(p.role,
-              style: const TextStyle(color: Colors.white70, fontSize: 13)),
-          const SizedBox(height: 6),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(10),
+                color: AppColors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-            child: Text(p.isOnline ? '🟢 Online' : '⚫ Offline',
-                style: const TextStyle(color: AppColors.white, fontSize: 12)),
           ),
-          if (gp != null) ...[
-            const SizedBox(height: 6),
-            Row(children: [
-              const Icon(Icons.location_on_rounded,
-                  color: Colors.white70, size: 14),
-              const SizedBox(width: 4),
-              Expanded(
-                child: _PlaceNameWidget(
-                  geoPoint: gp,
-                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  p.fullName,
+                  style: const TextStyle(
+                    color: AppColors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-              ),
-            ]),
-          ],
-          if (!p.isOnline)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                'Last seen: ${LastSeenHelper.format(p.lastSeen)}',
-                style: const TextStyle(color: Colors.white60, fontSize: 11),
-              ),
+                Text(
+                  p.role,
+                  style: const TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    p.isOnline ? '🟢 Online' : '⚫ Offline',
+                    style: const TextStyle(
+                      color: AppColors.white,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                if (gp != null) ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.location_on_rounded,
+                        color: Colors.white70,
+                        size: 14,
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: _PlaceNameWidget(
+                          geoPoint: gp,
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+                if (!p.isOnline)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      'Last seen: ${LastSeenHelper.format(p.lastSeen)}',
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+              ],
             ),
-        ])),
-      ]),
+          ),
+        ],
+      ),
     );
   }
 
-  Widget _secTitle(String title, String sub, IconData icon,
-      {Color color = AppColors.primary}) {
-    return Row(children: [
-      Container(
+  Widget _secTitle(
+    String title,
+    String sub,
+    IconData icon, {
+    Color color = AppColors.primary,
+  }) {
+    return Row(
+      children: [
+        Container(
           padding: const EdgeInsets.all(8),
           decoration: BoxDecoration(
-              color: color.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(10)),
-          child: Icon(icon, color: color, size: 20)),
-      const SizedBox(width: 10),
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title,
-            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
-        Text(sub, style: const TextStyle(fontSize: 11, color: Colors.black45)),
-      ]),
-    ]);
+            color: color.withOpacity(0.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: color, size: 20),
+        ),
+        const SizedBox(width: 10),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+            ),
+            Text(
+              sub,
+              style: const TextStyle(fontSize: 11, color: Colors.black45),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 }
 
@@ -4319,100 +5232,153 @@ class _RankedCard extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(14),
-          side: BorderSide(color: c.withOpacity(0.3))),
+        borderRadius: BorderRadius.circular(14),
+        side: BorderSide(color: c.withOpacity(0.3)),
+      ),
       elevation: 2,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(children: [
-          Container(
+        child: Row(
+          children: [
+            Container(
               width: 32,
               height: 32,
               decoration: BoxDecoration(
-                  color: c.withOpacity(0.12), shape: BoxShape.circle),
+                color: c.withOpacity(0.12),
+                shape: BoxShape.circle,
+              ),
               child: Center(
-                  child: Text(_rank(result.priority).toString(),
-                      style: TextStyle(
-                          color: c,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13)))),
-          const SizedBox(width: 10),
-          CircleAvatar(
+                child: Text(
+                  _rank(result.priority).toString(),
+                  style: TextStyle(
+                    color: c,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            CircleAvatar(
               radius: 20,
               backgroundColor: p.roleColor.withOpacity(0.15),
-              child: Text(p.initials,
-                  style: TextStyle(
-                      color: p.roleColor,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 12))),
-          const SizedBox(width: 10),
-          Expanded(
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                Text(p.fullName,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 13)),
-                Text(p.role,
-                    style:
-                        const TextStyle(fontSize: 11, color: Colors.black45)),
-                _PlaceNameWidget(
-                  geoPoint: p.displayLocation,
-                  style: const TextStyle(fontSize: 10, color: Colors.black38),
-                ),
-                _OfflineBadge(person: p, compact: true),
-              ])),
-          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-            Text(result.distanceText,
+              child: Text(
+                p.initials,
                 style: TextStyle(
-                    color: c, fontWeight: FontWeight.bold, fontSize: 13)),
-            Container(
-              margin: const EdgeInsets.only(top: 3),
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                  color: c.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(8)),
-              child: Text(result.priorityLabel,
+                  color: p.roleColor,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    p.fullName,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 13,
+                    ),
+                  ),
+                  Text(
+                    p.role,
+                    style: const TextStyle(fontSize: 11, color: Colors.black45),
+                  ),
+                  _PlaceNameWidget(
+                    geoPoint: p.displayLocation,
+                    style: const TextStyle(fontSize: 10, color: Colors.black38),
+                  ),
+                  _OfflineBadge(person: p, compact: true),
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  result.distanceText,
                   style: TextStyle(
-                      color: c, fontSize: 10, fontWeight: FontWeight.bold)),
+                    color: c,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+                Container(
+                  margin: const EdgeInsets.only(top: 3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 2,
+                  ),
+                  decoration: BoxDecoration(
+                    color: c.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    result.priorityLabel,
+                    style: TextStyle(
+                      color: c,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ]),
-          const SizedBox(width: 10),
-          Column(children: [
-            GestureDetector(
-              onTap: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
+            const SizedBox(width: 10),
+            Column(
+              children: [
+                GestureDetector(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
                       builder: (_) =>
-                          InAppCallScreen(peer: p, isOutgoing: true))),
-              child: Container(
-                padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(
-                    color:
-                        (p.isOnline ? AppColors.primary : AppColors.offlineGrey)
-                            .withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(8)),
-                child: Icon(Icons.call_rounded,
-                    color:
-                        p.isOnline ? AppColors.primary : AppColors.offlineGrey,
-                    size: 15),
-              ),
+                          InAppCallScreen(peer: p, isOutgoing: true),
+                    ),
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: (p.isOnline
+                              ? AppColors.primary
+                              : AppColors.offlineGrey)
+                          .withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(
+                      Icons.call_rounded,
+                      color: p.isOnline
+                          ? AppColors.primary
+                          : AppColors.offlineGrey,
+                      size: 15,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                GestureDetector(
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => InAppChatScreen(peer: p)),
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: AppColors.purple.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.message_rounded,
+                      color: AppColors.purple,
+                      size: 15,
+                    ),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 6),
-            GestureDetector(
-              onTap: () => Navigator.push(context,
-                  MaterialPageRoute(builder: (_) => InAppChatScreen(peer: p))),
-              child: Container(
-                padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(
-                    color: AppColors.purple.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(8)),
-                child: const Icon(Icons.message_rounded,
-                    color: AppColors.purple, size: 15),
-              ),
-            ),
-          ]),
-        ]),
+          ],
+        ),
       ),
     );
   }
@@ -4451,124 +5417,174 @@ class _AiCard extends StatelessWidget {
         border: Border.all(color: color.withOpacity(0.25)),
         boxShadow: [
           BoxShadow(
-              color: color.withOpacity(0.08),
-              blurRadius: 8,
-              offset: const Offset(0, 3))
+            color: color.withOpacity(0.08),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
         ],
       ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Container(
-              padding: const EdgeInsets.all(7),
-              decoration: BoxDecoration(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(7),
+                decoration: BoxDecoration(
                   color: color.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(10)),
-              child: Icon(canCall ? Icons.call_rounded : Icons.message_rounded,
-                  color: color, size: 18)),
-          const SizedBox(width: 10),
-          Expanded(
-              child: Column(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  canCall ? Icons.call_rounded : Icons.message_rounded,
+                  color: color,
+                  size: 18,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                Text(
-                    canCall
-                        ? 'Recommended: In-app Call'
-                        : 'Recommended: Message',
-                    style: TextStyle(
+                    Text(
+                      canCall
+                          ? 'Recommended: In-app Call'
+                          : 'Recommended: Message',
+                      style: TextStyle(
                         color: color,
                         fontWeight: FontWeight.bold,
-                        fontSize: 13)),
-                Text(suggestion.target.person.fullName,
-                    style:
-                        const TextStyle(fontSize: 12, color: Colors.black54)),
-                _PlaceNameWidget(
-                  geoPoint: suggestion.target.person.displayLocation,
-                  style:
-                      const TextStyle(fontSize: 11, color: AppColors.primary),
-                ),
-              ])),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: VerilogDistanceRanker.priorityColor(
-                      suggestion.target.priority)
-                  .withOpacity(0.12),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(suggestion.target.distanceText,
-                style: TextStyle(
-                  color: VerilogDistanceRanker.priorityColor(
-                      suggestion.target.priority),
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                )),
-          ),
-        ]),
-        const SizedBox(height: 10),
-        Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-              color: AppColors.background,
-              borderRadius: BorderRadius.circular(10)),
-          child: Text(suggestion.reason,
-              style: const TextStyle(fontSize: 13, color: Colors.black54)),
-        ),
-        const SizedBox(height: 10),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: color.withOpacity(0.06),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: color.withOpacity(0.2)),
-          ),
-          child: Row(children: [
-            const Icon(Icons.format_quote_rounded,
-                size: 14, color: Colors.black38),
-            const SizedBox(width: 6),
-            Expanded(
-                child: Text(suggestion.messageTemplate,
-                    style: const TextStyle(
                         fontSize: 13,
-                        fontStyle: FontStyle.italic,
-                        color: Colors.black54))),
-          ]),
-        ),
-        const SizedBox(height: 12),
-        SizedBox(
-          width: double.infinity,
-          child: ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: isOnline ? color : AppColors.offlineGrey,
-              foregroundColor: AppColors.white,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
-              padding: const EdgeInsets.symmetric(vertical: 10),
-            ),
-            icon: Icon(canCall ? Icons.call_rounded : Icons.send_rounded,
-                size: 16),
-            label: Text(canCall
-                ? 'Call Now (In-app)'
-                : !isOnline
-                    ? 'Offline — Send Message'
-                    : 'Send Message'),
-            onPressed: isOnline
-                ? canCall
-                    ? () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => InAppCallScreen(
-                                peer: suggestion.target.person,
-                                isOutgoing: true)))
-                    : () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => InAppChatScreen(
-                                peer: suggestion.target.person)))
-                : null,
+                      ),
+                    ),
+                    Text(
+                      suggestion.target.person.fullName,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black54,
+                      ),
+                    ),
+                    _PlaceNameWidget(
+                      geoPoint: suggestion.target.person.displayLocation,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppColors.primary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: VerilogDistanceRanker.priorityColor(
+                    suggestion.target.priority,
+                  ).withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  suggestion.target.distanceText,
+                  style: TextStyle(
+                    color: VerilogDistanceRanker.priorityColor(
+                      suggestion.target.priority,
+                    ),
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
           ),
-        ),
-      ]),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: AppColors.background,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              suggestion.reason,
+              style: const TextStyle(fontSize: 13, color: Colors.black54),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.06),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: color.withOpacity(0.2)),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.format_quote_rounded,
+                  size: 14,
+                  color: Colors.black38,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    suggestion.messageTemplate,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontStyle: FontStyle.italic,
+                      color: Colors.black54,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: isOnline ? color : AppColors.offlineGrey,
+                foregroundColor: AppColors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+              ),
+              icon: Icon(
+                canCall ? Icons.call_rounded : Icons.send_rounded,
+                size: 16,
+              ),
+              label: Text(
+                canCall
+                    ? 'Call Now (In-app)'
+                    : !isOnline
+                        ? 'Offline — Send Message'
+                        : 'Send Message',
+              ),
+              onPressed: isOnline
+                  ? canCall
+                      ? () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => InAppCallScreen(
+                                peer: suggestion.target.person,
+                                isOutgoing: true,
+                              ),
+                            ),
+                          )
+                      : () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => InAppChatScreen(
+                                peer: suggestion.target.person,
+                              ),
+                            ),
+                          )
+                  : null,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -4580,8 +5596,11 @@ class _FindPeopleTab extends StatefulWidget {
   final CampusPerson? myProfile;
   final Position? myPosition;
   final void Function(String, {bool error}) onSnack;
-  const _FindPeopleTab(
-      {this.myProfile, this.myPosition, required this.onSnack});
+  const _FindPeopleTab({
+    this.myProfile,
+    this.myPosition,
+    required this.onSnack,
+  });
   @override
   State<_FindPeopleTab> createState() => _FindPeopleTabState();
 }
@@ -4629,92 +5648,118 @@ class _FindPeopleTabState extends State<_FindPeopleTab> {
       'createdAt': FieldValue.serverTimestamp(),
     });
     setState(() => _reqCache[target.uid] = true);
-    widget.onSnack('Request sent! Location visible after '
-        '${target.firstName} accepts.');
+    widget.onSnack(
+      'Request sent! Location visible after '
+      '${target.firstName} accepts.',
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final myUid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    return Column(children: [
-      Padding(
-        padding: const EdgeInsets.all(12),
-        child: Container(
-          decoration: BoxDecoration(
-            color: AppColors.white,
-            borderRadius: BorderRadius.circular(16),
-            boxShadow: [
-              BoxShadow(
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Container(
+            decoration: BoxDecoration(
+              color: AppColors.white,
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
                   color: Colors.black.withOpacity(0.08),
                   blurRadius: 8,
-                  offset: const Offset(0, 3))
-            ],
-          ),
-          child: TextField(
-            controller: _searchCtrl,
-            onChanged: (v) => setState(() => _query = v.toLowerCase()),
-            decoration: const InputDecoration(
-              hintText: 'Search by name, role or roll number…',
-              hintStyle: TextStyle(fontSize: 13, color: Colors.black38),
-              prefixIcon: Icon(Icons.search_rounded,
-                  color: AppColors.primary, size: 22),
-              border: InputBorder.none,
-              contentPadding:
-                  EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: TextField(
+              controller: _searchCtrl,
+              onChanged: (v) => setState(() => _query = v.toLowerCase()),
+              decoration: const InputDecoration(
+                hintText: 'Search by name, role or roll number…',
+                hintStyle: TextStyle(fontSize: 13, color: Colors.black38),
+                prefixIcon: Icon(
+                  Icons.search_rounded,
+                  color: AppColors.primary,
+                  size: 22,
+                ),
+                border: InputBorder.none,
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+              ),
             ),
           ),
         ),
-      ),
-      Expanded(
-        child: StreamBuilder<QuerySnapshot>(
-          stream: FirebaseFirestore.instance.collection('users').snapshots(),
-          builder: (context, snap) {
-            if (!snap.hasData) {
-              return const Center(
-                  child: CircularProgressIndicator(color: AppColors.primary));
-            }
-            final docs = snap.data!.docs
-                .where((d) => d.id != myUid)
-                .map((d) => CampusPerson.fromFirestore(
-                    d.id, d.data() as Map<String, dynamic>))
-                .where((p) {
-              if (_query.isEmpty) return true;
-              return p.fullName.toLowerCase().contains(_query) ||
-                  p.role.toLowerCase().contains(_query) ||
-                  (p.rollNumber?.toLowerCase().contains(_query) ?? false) ||
-                  p.email.toLowerCase().contains(_query);
-            }).toList();
+        Expanded(
+          child: StreamBuilder<QuerySnapshot>(
+            stream: FirebaseFirestore.instance.collection('users').snapshots(),
+            builder: (context, snap) {
+              if (!snap.hasData) {
+                return const Center(
+                  child: CircularProgressIndicator(color: AppColors.primary),
+                );
+              }
+              final docs = snap.data!.docs
+                  .where((d) => d.id != myUid)
+                  .map(
+                    (d) => CampusPerson.fromFirestore(
+                      d.id,
+                      d.data() as Map<String, dynamic>,
+                    ),
+                  )
+                  .where((p) {
+                if (_query.isEmpty) return true;
+                return p.fullName.toLowerCase().contains(_query) ||
+                    p.role.toLowerCase().contains(_query) ||
+                    (p.rollNumber?.toLowerCase().contains(_query) ?? false) ||
+                    p.email.toLowerCase().contains(_query);
+              }).toList();
 
-            if (docs.isEmpty) {
-              return Center(
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.search_off_rounded,
-                    size: 60, color: Colors.black26),
-                const SizedBox(height: 12),
-                Text(
-                    _query.isEmpty
-                        ? 'No users found'
-                        : 'No results for "$_query"',
-                    style: const TextStyle(color: Colors.black45)),
-              ]));
-            }
+              if (docs.isEmpty) {
+                return Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.search_off_rounded,
+                        size: 60,
+                        color: Colors.black26,
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        _query.isEmpty
+                            ? 'No users found'
+                            : 'No results for "$_query"',
+                        style: const TextStyle(color: Colors.black45),
+                      ),
+                    ],
+                  ),
+                );
+              }
 
-            return ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              itemCount: docs.length,
-              itemBuilder: (_, i) => _FindTile(
-                person: docs[i],
-                myPosition: widget.myPosition,
-                isConnected: _isConnected,
-                requestSent: _reqSent,
-                onSendRequest: _sendReq,
-                onSnack: widget.onSnack,
-              ),
-            );
-          },
+              return ListView.builder(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 4,
+                ),
+                itemCount: docs.length,
+                itemBuilder: (_, i) => _FindTile(
+                  person: docs[i],
+                  myPosition: widget.myPosition,
+                  isConnected: _isConnected,
+                  requestSent: _reqSent,
+                  onSendRequest: _sendReq,
+                  onSnack: widget.onSnack,
+                ),
+              );
+            },
+          ),
         ),
-      ),
-    ]);
+      ],
+    );
   }
 }
 
@@ -4764,10 +5809,11 @@ class _FindTileState extends State<_FindTile> {
       return null;
     }
     final d = Geolocator.distanceBetween(
-        widget.myPosition!.latitude,
-        widget.myPosition!.longitude,
-        widget.person.location!.latitude,
-        widget.person.location!.longitude);
+      widget.myPosition!.latitude,
+      widget.myPosition!.longitude,
+      widget.person.location!.latitude,
+      widget.person.location!.longitude,
+    );
     return d < 1000
         ? '${d.toStringAsFixed(0)} m'
         : '${(d / 1000).toStringAsFixed(1)} km';
@@ -4786,18 +5832,25 @@ class _FindTileState extends State<_FindTile> {
       shadowColor: Colors.black12,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        child: Row(children: [
-          Stack(children: [
-            CircleAvatar(
-                radius: 24,
-                backgroundColor: p.roleColor.withOpacity(0.15),
-                child: Text(p.initials,
+        child: Row(
+          children: [
+            Stack(
+              children: [
+                CircleAvatar(
+                  radius: 24,
+                  backgroundColor: p.roleColor.withOpacity(0.15),
+                  child: Text(
+                    p.initials,
                     style: TextStyle(
-                        color: p.roleColor, fontWeight: FontWeight.bold))),
-            Positioned(
-                bottom: 0,
-                right: 0,
-                child: Container(
+                      color: p.roleColor,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                Positioned(
+                  bottom: 0,
+                  right: 0,
+                  child: Container(
                     width: 13,
                     height: 13,
                     decoration: BoxDecoration(
@@ -4805,59 +5858,75 @@ class _FindTileState extends State<_FindTile> {
                           p.isOnline ? AppColors.accent : AppColors.offlineGrey,
                       shape: BoxShape.circle,
                       border: Border.all(color: AppColors.white, width: 2),
-                    ))),
-          ]),
-          const SizedBox(width: 12),
-          Expanded(
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(width: 12),
+            Expanded(
               child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                Text(p.fullName,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    p.fullName,
                     style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 14)),
-                Text(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                    ),
+                  ),
+                  Text(
                     [
                       p.role,
                       if (p.rollNumber != null) p.rollNumber!,
                       if (_distText != null) _distText!,
                     ].join(' · '),
-                    style:
-                        const TextStyle(fontSize: 11, color: Colors.black45)),
-                _OfflineBadge(person: p, compact: true),
-              ])),
-          const SizedBox(width: 8),
-          _connected == null
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2))
-              : isConn
-                  ? _btn(
-                      Icons.location_on_rounded, 'Location', AppColors.accent,
-                      () {
-                      Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                              builder: (_) =>
-                                  _PersonLocationScreen(person: p)));
-                    })
-                  : sent
-                      ? _chip('Requested', Colors.orange)
-                      : _btn(
-                          Icons.person_add_rounded,
-                          'Connect',
-                          AppColors.primary,
-                          _working
-                              ? null
-                              : () async {
-                                  setState(() => _working = true);
-                                  await widget.onSendRequest(p);
-                                  setState(() {
-                                    _working = false;
-                                    _sent = true;
-                                  });
-                                }),
-        ]),
+                    style: const TextStyle(fontSize: 11, color: Colors.black45),
+                  ),
+                  _OfflineBadge(person: p, compact: true),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            _connected == null
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : isConn
+                    ? _btn(
+                        Icons.location_on_rounded,
+                        'Location',
+                        AppColors.accent,
+                        () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => _PersonLocationScreen(person: p),
+                            ),
+                          );
+                        },
+                      )
+                    : sent
+                        ? _chip('Requested', Colors.orange)
+                        : _btn(
+                            Icons.person_add_rounded,
+                            'Connect',
+                            AppColors.primary,
+                            _working
+                                ? null
+                                : () async {
+                                    setState(() => _working = true);
+                                    await widget.onSendRequest(p);
+                                    setState(() {
+                                      _working = false;
+                                      _sent = true;
+                                    });
+                                  },
+                          ),
+          ],
+        ),
       ),
     );
   }
@@ -4872,24 +5941,35 @@ class _FindTileState extends State<_FindTile> {
           borderRadius: BorderRadius.circular(10),
           border: Border.all(color: color.withOpacity(0.3)),
         ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(icon, color: color, size: 14),
-          const SizedBox(width: 4),
-          Text(label,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: color, size: 14),
+            const SizedBox(width: 4),
+            Text(
+              label,
               style: TextStyle(
-                  color: color, fontSize: 12, fontWeight: FontWeight.bold)),
-        ]),
+                color: color,
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _chip(String label, Color color) => Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Text(label,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(
+          label,
           style: TextStyle(
-              color: color, fontSize: 12, fontWeight: FontWeight.bold)));
+              color: color, fontSize: 12, fontWeight: FontWeight.bold),
+        ),
+      );
 }
